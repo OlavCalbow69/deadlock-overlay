@@ -5,8 +5,8 @@ sealed record SchemaValidation(string ClientSha256, string EngineSha256, int Fie
 static class ReaderSupport {
     // This whitelist describes the manually validated reader, not every layout in a generated SDK.
     // Unknown binary hashes remain unsupported even when these schema fields match.
-    public const string ClientHash = "F66A0FDFE60029CCA711DFF32644941303396C2D9D16774A6CB2570C28520B10";
-    public const string EngineHash = "0782CAED3E1C476389FE2A27A0713D47567A5237F706B151CE7CC34A05DBADC3";
+    public const string ClientHash = "678AEC94ADB44623E335EE7EC76C08F4477A0EA88A85CEA5CB70ABACE1BACAA8";
+    public const string EngineHash = "AAC84E48DE57844D5499AF8FD95C976143EFE2F14845FF2409B111EB9FF5CE74";
     public static readonly (string Class, string Field, uint Offset)[] Required = [
         ("C_BaseEntity", "m_pGameSceneNode", 0x330),
         ("C_BaseEntity", "m_pCollision", 0x340),

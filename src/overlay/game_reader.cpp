@@ -10,9 +10,9 @@
 
 namespace overlay {
 namespace {
-// 4 October 2026 client: field layouts checked against the corrected dump,
+// Build 6753 client: field layouts checked against the fresh 6 October dump,
 // globals checked against unique signatures and RIP-relative references.
-constexpr char supported[] = "f66a0fdfe60029cca711dff32644941303396c2d9d16774a6cb2570c28520b10";
+constexpr char supported[] = "678aec94adb44623e335ee7ec76c08f4477a0ea88a85cea5cb70abace1bacaa8";
 std::string sha256(const std::vector<unsigned char>& bytes) {
     BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{};
     if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0)<0) return {};
@@ -120,10 +120,10 @@ bool GameReader::attach() {
     if (sha256(file)!=supported) {status_="Unsupported client.dll: update required";next_attach_=now+10000;return false;}
     std::ifstream engine_input(std::filesystem::path(engine_path),std::ios::binary);
     std::vector<unsigned char> engine_file{std::istreambuf_iterator<char>(engine_input),{}};
-    if(sha256(engine_file)!="0782caed3e1c476389fe2a27a0713d47567a5237f706b151ce7cc34a05dbadc3")engine_base_=0;
+    if(sha256(engine_file)!="aac84e48de57844d5499af8fd95c976143efe2f14845ff2409b111eb9ff5ce74")engine_base_=0;
     std::ifstream world_input(std::filesystem::path(world_path),std::ios::binary);
     std::vector<unsigned char> world_file{std::istreambuf_iterator<char>(world_input),{}};
-    if(sha256(world_file)!="c14c141a2c16caf38c29debe169e8b406f7474800766281d81ba6fe7c2ffc474")world_renderer_base_=0;
+    if(sha256(world_file)!="2e8dd9057d381c0d097e6fe12e822796cfff4672c1b1eda6b25cd277dd756d5e")world_renderer_base_=0;
     process_=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|SYNCHRONIZE,FALSE,target);
     if (!process_) {status_="Read access denied; try Run as administrator";return false;}
     pid_=target;
@@ -142,7 +142,7 @@ bool GameReader::attach() {
             matrix_address_=base_+transform+i+7+displacement; ++matches;
         }
     }
-    if (matches!=1 || entity_slot_-base_!=0x3be8840 || matrix_address_-base_!=0x3c1d760) {
+    if (matches!=1 || entity_slot_-base_!=0x3bf3bc0 || matrix_address_-base_!=0x3c28c60) {
         status_="Resolved addresses differ from validated profile";detach();return false;
     }
     status_="Connected to validated client.dll"; return true;
@@ -319,7 +319,7 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     uint32_t capacity{};uintptr_t array{};int root{};
     std::memcpy(&capacity,weapon_map.data()+12,4);capacity&=0x7fffffff;
     std::memcpy(&array,weapon_map.data()+16,8);std::memcpy(&root,weapon_map.data()+24,4);
-    auto primary=pointer(base_+0x3438b28);uintptr_t info{};
+    auto primary=pointer(base_+0x34434a8);uintptr_t info{};
     if(!primary||!array||capacity>128)return result;
     for(uint32_t steps=0;steps<capacity&&root>=0&&uint32_t(root)<capacity;++steps){
         std::array<unsigned char,24> node{};auto address=array+0x8e8*size_t(root);
@@ -338,12 +338,12 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
         result.status="Waiting for fresh bullet-speed modifier";
         uint8_t policy{},fallback{};uint16_t dirty{};
         // The engine writes this mirror even when its cache-read optimization is disabled.
-        if(!read(base_+0x3b8acf0+170,policy)||!read(base_+0x3b8adec,fallback)||!read(prop+516+2*170,dirty))return result;
+        if(!read(base_+0x3b96240+170,policy)||!read(base_+0x3b9633c,fallback)||!read(prop+516+2*170,dirty))return result;
         if(!policy)policy=fallback;
         std::array<uint32_t,12> cache{},again{};
         if(!read(prop+1008+48*170,cache))return result;
         float bonus{};std::memcpy(&bonus,&cache[8],4);uint32_t tick{};
-        if(policy==4){auto globals=pointer(base_+0x3273918);if(!globals||!read(globals+68,tick))return result;}
+        if(policy==4){auto globals=pointer(base_+0x327d618);if(!globals||!read(globals+68,tick))return result;}
         if(!read(prop+512,version_after)||!read(prop+1008+48*170,again)||cache!=again
             ||!valid_modifier_cache(cache[0],cache[2],version_before,version_after,policy,cache[3],tick,dirty,cache[4],bonus,cache[1]))return result;
         result.bonus_percent=cache[4]?bonus:0;
@@ -367,12 +367,12 @@ Snapshot GameReader::sample(ReadOptions options) {
     if (process_ && WaitForSingleObject(process_,0)!=WAIT_TIMEOUT) {detach();status_="Waiting for Deadlock";next_attach_=0;}
     if (!process_ && !attach()) {result.status=status_;return result;}
     result.pid=pid_;result.status=status_;
-    auto rules=pointer(base_+0x3c17b60);std::array<int,2> modes{};
-    if(rules&&pointer(rules)==base_+0x26859b0&&read(rules+0xa8,modes)&&pointer(base_+0x3c17b60)==rules) {
+    auto rules=pointer(base_+0x3c23060);std::array<int,2> modes{};
+    if(rules&&pointer(rules)==base_+0x268cd28&&read(rules+0xa8,modes)&&pointer(base_+0x3c23060)==rules) {
         result.match_mode=modes[0];result.game_mode=modes[1];
         // Verified mode enum: game 3=Sandbox; match 3=CoopBot.
         result.practice=(modes[1]==3||modes[0]==3);
-        auto testing=pointer(base_+0x367e8b0);uint8_t hero_testing{};
+        auto testing=pointer(base_+0x3689250);uint8_t hero_testing{};
         // The game's sandbox predicate also accepts its server testing convar.
         if((modes[0]==0||modes[0]==2)&&testing&&read(testing+88,hero_testing)&&hero_testing==1)result.practice=true;
     }

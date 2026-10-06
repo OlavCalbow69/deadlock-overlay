@@ -1,6 +1,6 @@
 # How this overlay's visibility check works
 
-Updated 5 October 2026. This describes the implementation in this repository, including the distinction between “player partly visible” and “the exact focus point is clear.”
+Updated 6 October 2026 for build 6753. This describes the implementation in this repository, including the distinction between “player partly visible” and “the exact focus point is clear.”
 
 ## 1. Export static collision geometry
 
@@ -25,7 +25,7 @@ The menu/start map lacks a usable physics aggregate and is absent. Unsupported m
 
 The external reader obtains the level name from the engine connection state. Directly loaded maps use that name. In a live streamed match, however, the engine can report `start`: that is the bootstrap level, which has no collision mesh. In this case the reader resolves the gameplay arena from the active world renderer's `CSingleWorldRep` list. In the validated live match, the list contained `maps/start/world`, `maps/dl_midtown/world`, and several `maps/scenes/.../world` entries; only `dl_midtown` selects the arena mesh. This uses the actual loaded resource name, rather than a hardcoded `start` → `dl_midtown` alias.
 
-The streamed reader accepts the canonical `maps/<map>/world` resource shape and ignores bootstrap, UI and portrait-scene paths. Multiple distinct arenas, invalid list headers or pointers, and a list changing during the read produce a waiting/error state rather than selecting an arbitrary map. It validates worldrenderer.dll SHA256 `c14c141a2c16caf38c29debe169e8b406f7474800766281d81ba6fe7c2ffc474` and the manager/world-representation/world-instance vtables before using this private layout. A different renderer binary can require a profile update even when the schema fields still match.
+The streamed reader accepts the canonical `maps/<map>/world` resource shape and ignores bootstrap, UI and portrait-scene paths. Multiple distinct arenas, invalid list headers or pointers, and a list changing during the read produce a waiting/error state rather than selecting an arbitrary map. It validates worldrenderer.dll SHA256 `2e8dd9057d381c0d097e6fe12e822796cfff4672c1b1eda6b25cd277dd756d5e` and the manager/world-representation/world-instance vtables before using this private layout. A different renderer binary can require a profile update even when the schema fields still match.
 
 The resolved map key normalizes slashes, strips directories and the extension, lowercases the basename and accepts only a bounded alphanumeric/underscore/hyphen name. For example `maps/dl_midtown.vpk` becomes `dl_midtown`. This produces a mesh filename beside the executable rather than using an arbitrary raw path from process memory. Full world scans are cached for up to one second, with list and selected-world identity checks between scans. Changes invalidate that cache. Names are read in small batches with a byte fallback at page boundaries.
 
