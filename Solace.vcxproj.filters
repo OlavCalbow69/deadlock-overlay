@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="App">
+      <UniqueIdentifier>{CFE5203E-CB38-498C-B46F-83344A3EA2BE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Core">
+      <UniqueIdentifier>{4307E6BF-CC23-4D62-B87C-78EC75E21FB4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Runtime">
+      <UniqueIdentifier>{41BA5F80-6C20-4E02-ACF3-298612E75EE7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Platform">
+      <UniqueIdentifier>{51660B1D-4BC2-4CC1-9207-66975B11ED30}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Auth">
+      <UniqueIdentifier>{1097BB8E-99B6-43F0-B40F-C8EE2B40456B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Assets">
+      <UniqueIdentifier>{D95EBCFC-E0BA-4372-951B-418313DCAD40}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics">
+      <UniqueIdentifier>{EC29D492-9134-4C76-AB92-2CB0DABD3C26}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI">
+      <UniqueIdentifier>{C0B39A5B-937C-411E-BEC1-6EA3A0D854C8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Foundation">
+      <UniqueIdentifier>{65FC6D80-C817-48A6-9C1D-B5F80BFB581C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Foundation\Motion">
+      <UniqueIdentifier>{B4AA3342-8C22-43F2-A4BD-D9A1134BE17F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Foundation\Typography">
+      <UniqueIdentifier>{017F4342-1EC1-4EDC-B588-362C937585F9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Controls">
+      <UniqueIdentifier>{92A29EE7-E645-42D3-9AE5-15E91259EEBA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Screens">
+      <UniqueIdentifier>{B228647F-3AC3-4D82-8DB3-03749D676E67}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI\Effects">
+      <UniqueIdentifier>{C5986495-1C20-4395-BC20-12E42248DE1C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Generated">
+      <UniqueIdentifier>{F978AB89-F810-4373-B42F-DC8A3D20C32C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Generated\Fonts">
+      <UniqueIdentifier>{73897C4A-211F-40E8-A7C7-22D8156AF406}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vendor">
+      <UniqueIdentifier>{EEB72DC4-23AF-408A-A0E2-A03EA442EBAE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vendor\ImGui">
+      <UniqueIdentifier>{EBD31865-FD33-43CD-89B7-A12E15E7F7C9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vendor\Backends">
+      <UniqueIdentifier>{7117D734-0BA4-47EE-9B58-C7BA0FEB98E4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Resources">
+      <UniqueIdentifier>{043573E0-87B9-455A-8F3C-D38D8031ED05}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\resources\Solace.rc">
+      <Filter>Resources</Filter>
+    </ResourceCompile>
+    <Manifest Include="src\resources\app.manifest">
+      <Filter>Resources</Filter>
+    </Manifest>
+    <Image Include="src\resources\solace.ico">
+      <Filter>Resources</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">
+      <Filter>App</Filter>
+    </ClCompile>
+    <ClCompile Include="src\core\environment.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\core\diagnostics.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\application\app.cpp">
+      <Filter>App</Filter>
+    </ClCompile>
+    <ClCompile Include="src\runtime\desktop_app.cpp">
+      <Filter>Runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\runtime.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\graphics\snapshot.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform\d3d11_renderer.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform\win32_window.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="src\graphics\dx11_helpers.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\validation.cpp">
+      <Filter>Auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\signup_form.cpp">
+      <Filter>Auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\signin_form.cpp">
+      <Filter>Auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\legal.cpp">
+      <Filter>Auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\auth_layout.cpp">
+      <Filter>Auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\assets\asset_io.cpp">
+      <Filter>Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="src\assets\images.cpp">
+      <Filter>Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="src\assets\avatars.cpp">
+      <Filter>Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\effects\glass_cursor.cpp">
+      <Filter>UI\Effects</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\motion\motion.cpp">
+      <Filter>UI\Foundation\Motion</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\svg.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\icons.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\primitives.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\theme.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\rounded_panel.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\draw.cpp">
+      <Filter>UI\Foundation</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\typography\font_cache.cpp">
+      <Filter>UI\Foundation\Typography</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\foundation\typography\kerning.cpp">
+      <Filter>UI\Foundation\Typography</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\morph_slider.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\loader.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\screens\shell_screen.cpp">
+      <Filter>UI\Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\screens\shell_layout.cpp">
+      <Filter>UI\Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\widgets.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\screens\shell_menus.cpp">
+      <Filter>UI\Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\caret.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\form_controls.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\theme_toggle.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\screens\search_overlay.cpp">
+      <Filter>UI\Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\controls\scroll.cpp">
+      <Filter>UI\Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\screens\page_renderer.cpp">
+      <Filter>UI\Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="src\generated\fonts\geist_data.cpp">
+      <Filter>Generated\Fonts</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui.cpp">
+      <Filter>Vendor\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_draw.cpp">
+      <Filter>Vendor\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_tables.cpp">
+      <Filter>Vendor\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_widgets.cpp">
+      <Filter>Vendor\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\misc\freetype\imgui_freetype.cpp">
+      <Filter>Vendor\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\backends\imgui_impl_dx11.cpp">
+      <Filter>Vendor\Backends</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\backends\imgui_impl_win32.cpp">
+      <Filter>Vendor\Backends</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\application\app.h">
+      <Filter>App</Filter>
+    </ClInclude>
+    <ClInclude Include="src\core\product_info.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\core\environment.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\core\diagnostics.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\application\brand.h">
+      <Filter>App</Filter>
+    </ClInclude>
+    <ClInclude Include="src\runtime\desktop_app.h">
+      <Filter>Runtime</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\runtime.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\graphics\snapshot.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="src\platform\d3d11_renderer.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="src\platform\win32_window.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="src\graphics\dx11_helpers.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="src\auth\validation.h">
+      <Filter>Auth</Filter>
+    </ClInclude>
+    <ClInclude Include="src\auth\auth.h">
+      <Filter>Auth</Filter>
+    </ClInclude>
+    <ClInclude Include="src\assets\asset_io.h">
+      <Filter>Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="src\assets\images.h">
+      <Filter>Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="src\assets\avatars.h">
+      <Filter>Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\effects\glass_cursor.h">
+      <Filter>UI\Effects</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\motion\motion.h">
+      <Filter>UI\Foundation\Motion</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\svg.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\icons.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\primitives.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\theme.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\rounded_panel.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\draw.h">
+      <Filter>UI\Foundation</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\typography\font_cache.h">
+      <Filter>UI\Foundation\Typography</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\foundation\typography\kerning.h">
+      <Filter>UI\Foundation\Typography</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\morph_slider.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\loader.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\caret.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\form_controls.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\screens\shell_menus.h">
+      <Filter>UI\Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\screens\search_overlay.h">
+      <Filter>UI\Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\screens\navigation.h">
+      <Filter>UI\Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\screens\page_renderer.h">
+      <Filter>UI\Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\scroll.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\screens\shell.h">
+      <Filter>UI\Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\theme_toggle.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui\controls\widgets.h">
+      <Filter>UI\Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="src\generated\fonts\geist_data.h">
+      <Filter>Generated\Fonts</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

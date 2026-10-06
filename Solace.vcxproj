@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\resources\Solace.rc" />
+    <Manifest Include="src\resources\app.manifest" />
+    <Image Include="src\resources\solace.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\application\app.cpp" />
+    <ClCompile Include="src\assets\asset_io.cpp" />
+    <ClCompile Include="src\assets\avatars.cpp" />
+    <ClCompile Include="src\assets\images.cpp" />
+    <ClCompile Include="src\auth\auth_layout.cpp" />
+    <ClCompile Include="src\auth\legal.cpp" />
+    <ClCompile Include="src\auth\signin_form.cpp" />
+    <ClCompile Include="src\auth\signup_form.cpp" />
+    <ClCompile Include="src\auth\validation.cpp" />
+    <ClCompile Include="src\core\diagnostics.cpp" />
+    <ClCompile Include="src\core\environment.cpp" />
+    <ClCompile Include="src\generated\fonts\geist_data.cpp">
+      <AdditionalOptions>/utf-8 /Zm2000 /bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="src\graphics\dx11_helpers.cpp" />
+    <ClCompile Include="src\graphics\snapshot.cpp" />
+    <ClCompile Include="src\platform\d3d11_renderer.cpp" />
+    <ClCompile Include="src\platform\win32_window.cpp" />
+    <ClCompile Include="src\runtime\desktop_app.cpp" />
+    <ClCompile Include="src\ui\controls\caret.cpp" />
+    <ClCompile Include="src\ui\controls\form_controls.cpp" />
+    <ClCompile Include="src\ui\controls\loader.cpp" />
+    <ClCompile Include="src\ui\controls\morph_slider.cpp" />
+    <ClCompile Include="src\ui\controls\scroll.cpp" />
+    <ClCompile Include="src\ui\controls\theme_toggle.cpp" />
+    <ClCompile Include="src\ui\controls\widgets.cpp" />
+    <ClCompile Include="src\ui\effects\glass_cursor.cpp" />
+    <ClCompile Include="src\ui\foundation\draw.cpp" />
+    <ClCompile Include="src\ui\foundation\icons.cpp" />
+    <ClCompile Include="src\ui\foundation\primitives.cpp" />
+    <ClCompile Include="src\ui\foundation\rounded_panel.cpp" />
+    <ClCompile Include="src\ui\foundation\runtime.cpp" />
+    <ClCompile Include="src\ui\foundation\svg.cpp" />
+    <ClCompile Include="src\ui\foundation\theme.cpp" />
+    <ClCompile Include="src\ui\foundation\motion\motion.cpp" />
+    <ClCompile Include="src\ui\foundation\typography\font_cache.cpp" />
+    <ClCompile Include="src\ui\foundation\typography\kerning.cpp" />
+    <ClCompile Include="src\ui\screens\page_renderer.cpp" />
+    <ClCompile Include="src\ui\screens\search_overlay.cpp" />
+    <ClCompile Include="src\ui\screens\shell_layout.cpp" />
+    <ClCompile Include="src\ui\screens\shell_menus.cpp" />
+    <ClCompile Include="src\ui\screens\shell_screen.cpp" />
+    <ClCompile Include="thirdparty\imgui\imgui.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_draw.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_tables.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\imgui_widgets.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\backends\imgui_impl_dx11.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\backends\imgui_impl_win32.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\misc\freetype\imgui_freetype.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\application\app.h" />
+    <ClInclude Include="src\application\brand.h" />
+    <ClInclude Include="src\assets\asset_io.h" />
+    <ClInclude Include="src\assets\avatars.h" />
+    <ClInclude Include="src\assets\images.h" />
+    <ClInclude Include="src\auth\auth.h" />
+    <ClInclude Include="src\auth\validation.h" />
+    <ClInclude Include="src\core\diagnostics.h" />
+    <ClInclude Include="src\core\environment.h" />
+    <ClInclude Include="src\core\product_info.h" />
+    <ClInclude Include="src\generated\fonts\geist_data.h" />
+    <ClInclude Include="src\graphics\dx11_helpers.h" />
+    <ClInclude Include="src\graphics\snapshot.h" />
+    <ClInclude Include="src\platform\d3d11_renderer.h" />
+    <ClInclude Include="src\platform\win32_window.h" />
+    <ClInclude Include="src\runtime\desktop_app.h" />
+    <ClInclude Include="src\ui\controls\caret.h" />
+    <ClInclude Include="src\ui\controls\form_controls.h" />
+    <ClInclude Include="src\ui\controls\loader.h" />
+    <ClInclude Include="src\ui\controls\morph_slider.h" />
+    <ClInclude Include="src\ui\controls\scroll.h" />
+    <ClInclude Include="src\ui\controls\theme_toggle.h" />
+    <ClInclude Include="src\ui\controls\widgets.h" />
+    <ClInclude Include="src\ui\effects\glass_cursor.h" />
+    <ClInclude Include="src\ui\foundation\draw.h" />
+    <ClInclude Include="src\ui\foundation\icons.h" />
+    <ClInclude Include="src\ui\foundation\primitives.h" />
+    <ClInclude Include="src\ui\foundation\rounded_panel.h" />
+    <ClInclude Include="src\ui\foundation\runtime.h" />
+    <ClInclude Include="src\ui\foundation\svg.h" />
+    <ClInclude Include="src\ui\foundation\theme.h" />
+    <ClInclude Include="src\ui\foundation\motion\motion.h" />
+    <ClInclude Include="src\ui\foundation\typography\font_cache.h" />
+    <ClInclude Include="src\ui\foundation\typography\kerning.h" />
+    <ClInclude Include="src\ui\screens\navigation.h" />
+    <ClInclude Include="src\ui\screens\page_renderer.h" />
+    <ClInclude Include="src\ui\screens\search_overlay.h" />
+    <ClInclude Include="src\ui\screens\shell.h" />
+    <ClInclude Include="src\ui\screens\shell_menus.h" />
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7D4A1C55-2B93-4A0E-9C41-6F5E1D2A88B1}</ProjectGuid>
+    <RootNamespace>Solace</RootNamespace>
+    <TargetName>Solace</TargetName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <VcpkgEnabled>false</VcpkgEnabled>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\obj\Solace\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\obj\Solace\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\imgui\misc\freetype;$(ProjectDir)thirdparty\freetype\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>IMGUI_DEFINE_MATH_OPERATORS;IMGUI_ENABLE_FREETYPE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <SDLCheck>true</SDLCheck>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dxgi.lib;freetype.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)thirdparty\freetype\win64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- The vendored FreeType archive was built with /MT and embeds a
+           /DEFAULTLIB:LIBCMT directive. Debug owns the final CRT choice (/MTd),
+           so ignore that directive and resolve every object against LIBCMTD. -->
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>true</BufferSecurityCheck>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\imgui\misc\freetype;$(ProjectDir)thirdparty\freetype\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>IMGUI_DEFINE_MATH_OPERATORS;IMGUI_ENABLE_FREETYPE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 /experimental:deterministic &quot;/pathmap:$(ProjectDir)=Solace/&quot; %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <SDLCheck>true</SDLCheck>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dxgi.lib;freetype.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)thirdparty\freetype\win64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <SubSystem>Windows</SubSystem>
+      <AdditionalOptions>/Brepro /PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

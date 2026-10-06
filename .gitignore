@@ -1,0 +1,42 @@
+# Build output
+/build/
+/Release/
+/Debug/
+/x64/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.log
+*.exe
+*.dll
+*.user
+*.aps
+.vs/
+
+# Generated game data and verification output
+/artifacts/
+/data/
+/maps/
+/verification/
+/tools/**/bin/
+/tools/**/obj/
+/tools/**/build/
+
+# Runtime diagnostics, local settings and generated previews
+/*.json
+/*.ini
+/marker*-preview.png
+/tools/schema-dumper/patterns.json
+/tools/schema-dumper/sdk-cherry-pick.json
+
+# Local credentials and editor state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+.idea/

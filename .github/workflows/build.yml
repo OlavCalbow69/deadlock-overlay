@@ -1,0 +1,75 @@
+name: Windows overlay build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build overlay and data tools
+        shell: pwsh
+        run: .\build.ps1 -RebuildDataTools
+
+      - name: Include assets and license notices
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath assets -Destination build/Release -Recurse -Force
+          Copy-Item -LiteralPath LICENSE,THIRD_PARTY_NOTICES.md -Destination build/Release
+          $noticeRoot = New-Item -ItemType Directory -Path build/Release/licenses -Force
+          Get-ChildItem -LiteralPath thirdparty -Recurse -File |
+            Where-Object { $_.Extension -in '.txt','.TXT' -or $_.Name -eq 'LICENSE' } |
+            ForEach-Object {
+              $relative = $_.FullName.Substring((Resolve-Path thirdparty).Path.Length + 1)
+              $destination = Join-Path $noticeRoot.FullName $relative
+              New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+              Copy-Item -LiteralPath $_.FullName -Destination $destination
+            }
+          Copy-Item -LiteralPath tools/map-export/VALVERESOURCEFORMAT-LICENSE.txt -Destination $noticeRoot.FullName
+
+      - name: Upload Windows build
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DeadlockOverlay-win64
+          path: |
+            build/Release/DeadlockOverlay.exe
+            build/Release/tools/data-update/DeadlockDataUpdate.exe
+            build/Release/tools/schema-dumper/dezlock-dump.exe
+            build/Release/tools/schema-dumper/dezlock-worker.dll
+            build/Release/tools/schema-dumper/patterns.json
+            build/Release/tools/schema-dumper/sdk-cherry-pick.json
+            build/Release/assets/
+            build/Release/licenses/
+            build/Release/LICENSE
+            build/Release/THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: overlay-verification
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Release/*test.json
+            build/Release/shutdown.json
+            build/Release/renderer-*.png
+          if-no-files-found: ignore
+          retention-days: 14

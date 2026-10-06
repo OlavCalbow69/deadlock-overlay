@@ -1,0 +1,38 @@
+#include <windows.h>
+
+#define IDI_SOLACE 101
+
+IDI_SOLACE ICON "solace.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Pondot\0"
+            VALUE "FileDescription", "Solace ImGui Interface\0"
+            VALUE "FileVersion", "0.1.0.0\0"
+            VALUE "InternalName", "Solace\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Pondot\0"
+            VALUE "OriginalFilename", "Solace.exe\0"
+            VALUE "ProductName", "Solace\0"
+            VALUE "ProductVersion", "0.1.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

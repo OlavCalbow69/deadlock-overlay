@@ -1,0 +1,19 @@
+# Normalise to LF in the repository. The sources are written with LF and the
+# MSVC toolchain does not care, so the alternative is every checkout on Windows
+# showing the whole tree as modified.
+* text=auto eol=lf
+
+*.sln       text eol=crlf
+*.vcxproj   text eol=crlf
+*.filters   text eol=crlf
+*.ps1       text eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.ico  binary
+*.mp4  binary
+*.lib  binary
+*.ttf  binary
+*.otf  binary
