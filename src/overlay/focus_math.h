@@ -76,22 +76,55 @@ inline bool skeleton_bone(std::string_view name) {
     for(auto joint:names)if(name==joint)return true;
     return false;
 }
-inline bool skeleton_head(std::string_view name) {return name=="head"||name=="head_end";}
+inline bool skeleton_connection(std::string_view parent,std::string_view child) {
+    auto head_or_neck=[](std::string_view name) {
+        return name=="head"||name=="head_end"||name=="neck"||name=="neck_0";
+    };
+    if(head_or_neck(parent)||head_or_neck(child))return false;
+    auto arm=[](std::string_view name) {
+        return name.starts_with("clavicle_")||name.starts_with("arm_upper_")
+            ||name.starts_with("arm_lower_")||name.starts_with("hand_");
+    };
+    // Keep arm segments and the chest-to-pelvis spine. Shoulder attachments
+    // are added separately at the highest remaining spine joint.
+    return arm(parent)==arm(child);
+}
 inline std::vector<std::pair<int,int>> skeleton_edges(const std::vector<std::string>& names,const std::vector<int16_t>& parents) {
     std::vector<std::pair<int,int>> result;
     if(names.size()!=parents.size()||names.empty()||names.size()>1024)return result;
+    std::vector<int> shoulders;
     for(int child=0;child<int(names.size())&&result.size()<64;++child) {
         if(!skeleton_bone(names[child]))continue;
         int parent=parents[child];
         for(size_t steps=0;steps<names.size();++steps) {
             if(parent<0||parent>=int(names.size())||parent==child)break;
             if(skeleton_bone(names[parent])) {
-                // Keep the head segment, but omit its connector to the neck/torso.
-                if(!skeleton_head(names[child])||skeleton_head(names[parent]))result.emplace_back(parent,child);
+                if(skeleton_connection(names[parent],names[child]))result.emplace_back(parent,child);
+                else if(names[child].starts_with("clavicle_")||names[child].starts_with("arm_upper_"))shoulders.push_back(child);
+                // Stop at the nearest anatomical parent even when this edge is
+                // omitted, so removed head/neck joints do not return.
                 break;
             }
             parent=parents[parent];
         }
+    }
+    auto spine=[](std::string_view name) {
+        return name=="pelvis"||name=="spine_0"||name=="spine_1"||name=="spine_2"||name=="spine_3"||name=="chest";
+    };
+    int top=-1,best_depth=0;
+    for(auto [a,b]:result)if(spine(names[a])&&spine(names[b])) {
+        int ancestor=b,depth=0;
+        for(size_t steps=0;ancestor>=0&&ancestor<int(names.size())&&steps<names.size();++steps) {
+            if(spine(names[ancestor]))++depth;
+            ancestor=parents[ancestor];
+        }
+        // Only attach to a spine endpoint that is actually drawn, and reject
+        // malformed/cyclic ancestry rather than inventing a connection.
+        if(ancestor<0&&depth>best_depth){top=b;best_depth=depth;}
+    }
+    if(top>=0)for(int shoulder:shoulders) {
+        if(result.size()>=64)break;
+        result.emplace_back(top,shoulder);
     }
     return result;
 }

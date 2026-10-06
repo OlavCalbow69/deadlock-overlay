@@ -284,8 +284,8 @@ check(camera_mode_allowed(false,false,true));
     check(skeleton_bone("arm_upper_L")&&skeleton_bone("pelvis")&&!skeleton_bone("finger_index_L")&&!skeleton_bone("spine_2_TWIST"));
     auto links=skeleton_edges({"pelvis","HLPR","head","weapon_hand_R"},{-1,0,1,2});
     check(links.empty());
-    auto anatomy=skeleton_edges({"pelvis","spine_2","neck","head","head_end","arm_upper_L"},{-1,0,1,2,3,2});
-    check(anatomy==std::vector<std::pair<int,int>>{{0,1},{1,2},{3,4},{2,5}});
+    auto anatomy=skeleton_edges({"pelvis","spine_2","neck","head","head_end","clavicle_L","arm_upper_L","arm_lower_L","hand_L","clavicle_R","arm_upper_R","leg_upper_L","spine_3"},{-1,0,12,2,3,1,5,6,7,2,9,0,1});
+    check(anatomy==std::vector<std::pair<int,int>>{{0,1},{5,6},{6,7},{7,8},{9,10},{0,11},{1,12},{12,5},{12,9}});
     check(skeleton_edges({"head","pelvis"},{-1}).empty());check(skeleton_edges({"head","helper"},{1,1}).empty());
     check(extra_target_kind(".?AVCItemXP@@")==TargetKind::SoulOrb);check(extra_target_kind(".?AVC_NPC_Trooper@@")==TargetKind::Minion);
     check(extra_target_kind(".?AVC_NPC_TrooperNeutral@@")==TargetKind::Minion);check(extra_target_kind(".?AVC_NPC_TrooperBoss@@")==TargetKind::None);
@@ -730,8 +730,10 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         int health=live?snap.players.front().health:740,maximum=live?snap.players.front().maximum:1000;
         if(app.settings.skeletons) {
             auto color=ImGui::ColorConvertFloat4ToU32(app.settings.skeleton_visible);
-            for(auto pair:std::array<std::pair<ImVec2,ImVec2>,7>{{{centre,centre+px(0,60)},{centre+px(0,28),centre+px(-29,48)},{centre+px(0,28),centre+px(29,48)},{centre+px(-29,48),centre+px(-35,68)},{centre+px(29,48),centre+px(35,68)},{centre+px(0,60),centre+px(-20,84)},{centre+px(0,60),centre+px(20,84)}}})
-                dl->AddLine(pair.first,pair.second,color,px(1.5f));
+            static const std::vector<std::string> names={"pelvis","spine_2","neck","head","head_end","clavicle_L","arm_upper_L","arm_lower_L","hand_L","clavicle_R","arm_upper_R","arm_lower_R","hand_R","leg_upper_L","leg_lower_L","ankle_L","leg_upper_R","leg_lower_R","ankle_R"};
+            static const auto edges=skeleton_edges(names,{-1,0,1,2,3,1,5,6,7,1,9,10,11,0,13,14,0,16,17});
+            constexpr std::array<ImVec2,19> joints={{{0,61},{0,38},{0,18},{0,0},{0,-12},{-16,28},{-26,30},{-35,50},{-38,69},{16,28},{26,30},{35,50},{38,69},{-13,64},{-19,78},{-20,90},{13,64},{19,78},{20,90}}};
+            for(auto [a,b]:edges)dl->AddLine(centre+px(joints[a].x,joints[a].y),centre+px(joints[b].x,joints[b].y),color,px(1.5f));
         }
         if(app.settings.enabled)draw_bar(dl,{centre.x,centre.y-px(22)},health,maximum,health_fraction(health,maximum),app.settings,ui_runtime::scale);
         if(app.settings.head_dot)draw_dot(dl,{centre.x,centre.y},0,ui_runtime::scale);

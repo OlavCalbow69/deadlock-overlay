@@ -18,4 +18,4 @@ The reader now uses the renderer's completed world-to-clip matrix directly: `CVi
 
 The Connection tab and Hero / abilities popup show the live render FOV and aspect. These are different from the camera-focus acquisition area's **Show FOV** control.
 
-The skeleton's head-to-neck/upper-body connector is omitted; the head/head-end segment, shoulders, torso and limbs remain available.
+Skeletons omit all head/head-end and neck segments. Both shoulders connect to the highest joint of the remaining drawn spine, even when their original parent was the neck or a lower spine joint. The chest-to-pelvis spine, arms and legs remain. The menu preview uses the same connections as the live skeleton.
