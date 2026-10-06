@@ -20,7 +20,14 @@ static class ReaderSupport {
         ("CGameSceneNode", "m_bDormant", 0x103),
         ("CSkeletonInstance", "m_modelState", 0x140),
         ("CCollisionProperty", "m_vecMins", 0x40),
-        ("CCollisionProperty", "m_vecMaxs", 0x4c)
+        ("CCollisionProperty", "m_vecMaxs", 0x4c),
+        ("C_CitadelPlayerPawn", "m_CCitadelHeroComponent", 0x1620),
+        ("C_CitadelPlayerPawn", "m_CCitadelAbilityComponent", 0x1440),
+        ("CCitadelHeroComponent", "m_spawnedHero", 0x18),
+        ("CitadelHeroSpawnData_t", "m_nHeroID", 0x8),
+        ("CitadelHeroData_t", "m_HeroID", 0x28),
+        ("CCitadelAbilityComponent", "m_vecAbilities", 0x68),
+        ("CCitadel_Ability_Hornet_Snipe", "m_flScopeStartTime", 0x1fe4)
     ];
     public static SchemaValidation Validate(string dump, string client, string engine) {
         var sdk = Path.Combine(dump, "sdk");

@@ -7,7 +7,10 @@ The fresh dump contains 33,929 fields. The used base-entity, controller, scene-n
 | Reader address | Previous RVA | Build 6753 RVA |
 | --- | --- | --- |
 | Entity-system pointer | `0x3BE8840` | `0x3BF3BC0` |
-| Projection matrix | `0x3C1D760` | `0x3C28C60` |
+| Cached ScreenTransform matrix | `0x3C1D760` | `0x3C28C60` |
+| Final render view object | — | `0x3644D60` |
+| Final render world-to-clip matrix | — | `CViewRender + 0x298` |
+| Hero data table count / pointer | — | `0x36A91F8` / `0x36A9200` |
 | Game-rules pointer | `0x3C17B60` | `0x3C23060` |
 | Game-rules vtable | `0x26859B0` | `0x268CD28` |
 | Primary weapon symbol | `0x3438B28` | `0x34434A8` |
@@ -35,3 +38,7 @@ Release was rebuilt and all five CTest suites passed: logic, renderer, console s
 The installed runtime connected to the current game in `dl_hideout`, read three controllers and two remote players with 44 skeleton segments, and reported no invalid handles or missing anchors. The Hideout mesh contained 483,158 triangles and camera projection was valid. Live primary weapon speed was 25,984.3 units/s with no velocity bonus, and Makcu connected on COM3 at 4,000,000 baud.
 
 The active-world renderer path was checked directly through read-only process inspection. This update did not repeat a live-match map transition, replay playback or bullet-velocity item buy/sell test; no mouse movement was sent during verification.
+
+The subsequent [hero/ability and aspect-override update](HERO_ABILITIES.md) switched projection to the final render matrix. Live reads with `r_aspectratio 2.3` confirmed the cached matrix used aspect 2.3 while the final rendered view used 1.777778. Vindicta's local ID, localized name, ability handle and scoped timer were also verified live. The new logic checks passed 656 cases, and the extended reader averaged 0.515 ms per sample in the tested sandbox scene. Resource checks showed no private-memory or handle growth across three cycles.
+
+The user confirmed skeleton alignment in normal and zoomed views with `r_aspectratio 2.3`, and confirmed that Assassinate switches to its separate camera-focus speed when scoped and restores the regular speed when unscoped.

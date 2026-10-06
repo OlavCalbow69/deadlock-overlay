@@ -10,6 +10,18 @@ inline Vec3 sub(Vec3 a,Vec3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline Vec3 mul(Vec3 a,float k){return {a.x*k,a.y*k,a.z*k};}
 inline float dot(Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 inline Vec3 cross(Vec3 a,Vec3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
+struct ProjectionInfo {bool valid{};float horizontal_fov{},vertical_fov{},aspect{};};
+inline ProjectionInfo projection_info(const Matrix& matrix) {
+    for(float value:matrix)if(!std::isfinite(value))return {};
+    Vec3 right{matrix[0],matrix[1],matrix[2]},up{matrix[4],matrix[5],matrix[6]},forward{matrix[12],matrix[13],matrix[14]};
+    float x=std::sqrt(dot(right,right)),y=std::sqrt(dot(up,up)),w=std::sqrt(dot(forward,forward));
+    if(x<1e-5f||y<1e-5f||w<1e-5f||std::abs(dot(right,up))/(x*y)>.002f
+        ||std::abs(dot(right,forward))/(x*w)>.002f||std::abs(dot(up,forward))/(y*w)>.002f)return {};
+    constexpr float degrees=180.f/3.14159265358979323846f;
+    ProjectionInfo info{true,2*std::atan2(w,x)*degrees,2*std::atan2(w,y)*degrees,y/x};
+    if(info.aspect<.1f||info.aspect>10||info.horizontal_fov<1||info.horizontal_fov>179)return {};
+    return info;
+}
 inline bool scene_point(const std::array<float,8>& transform,Vec3 local,Vec3& world) {
     for(auto value:transform)if(!std::isfinite(value))return false;
     if(!finite(local)||transform[3]<=0||transform[3]>16)return false;
@@ -64,6 +76,7 @@ inline bool skeleton_bone(std::string_view name) {
     for(auto joint:names)if(name==joint)return true;
     return false;
 }
+inline bool skeleton_head(std::string_view name) {return name=="head"||name=="head_end";}
 inline std::vector<std::pair<int,int>> skeleton_edges(const std::vector<std::string>& names,const std::vector<int16_t>& parents) {
     std::vector<std::pair<int,int>> result;
     if(names.size()!=parents.size()||names.empty()||names.size()>1024)return result;
@@ -72,7 +85,11 @@ inline std::vector<std::pair<int,int>> skeleton_edges(const std::vector<std::str
         int parent=parents[child];
         for(size_t steps=0;steps<names.size();++steps) {
             if(parent<0||parent>=int(names.size())||parent==child)break;
-            if(skeleton_bone(names[parent])){result.emplace_back(parent,child);break;}
+            if(skeleton_bone(names[parent])) {
+                // Keep the head segment, but omit its connector to the neck/torso.
+                if(!skeleton_head(names[child])||skeleton_head(names[parent]))result.emplace_back(parent,child);
+                break;
+            }
             parent=parents[parent];
         }
     }

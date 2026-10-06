@@ -2,6 +2,7 @@
 #include "logic.h"
 #include "focus_math.h"
 #include "weapon_profile.h"
+#include "hero_profile.h"
 #include "visibility.h"
 #include <windows.h>
 #include <string>
@@ -42,11 +43,13 @@ struct Snapshot {
     uint8_t local_team{};
     Vec3 local_velocity{};bool local_velocity_valid{};
     WeaponProfile weapon;
+    HeroProfile hero;
     bool replay{};
     bool practice{};int match_mode{-1},game_mode{-1};
     std::string map_name;
     std::string level_name,map_source;
     Matrix matrix{};
+    ProjectionInfo projection;
     std::shared_ptr<const VisibilityMesh> visibility;
     Vec3 camera_position{};bool camera_valid{};
     std::string visibility_status{"Waiting for map"};
@@ -80,6 +83,11 @@ private:
     };
     std::unordered_map<uintptr_t, std::string> types_;
     std::unordered_map<uintptr_t, BoneInfo> models_;
+    std::unordered_map<std::string,std::string> hero_names_;
+    struct HeroMetadata {uintptr_t address{};std::string name,token;};
+    std::unordered_map<int,HeroMetadata> heroes_;
+    uintptr_t ability_pawn_{};uint32_t sniper_handle_{UINT32_MAX};
+    std::vector<uint32_t> ability_handles_;
     std::vector<Entity> controllers_;
     std::vector<Entity> extras_;
     ReadOptions options_;
@@ -98,6 +106,7 @@ private:
     std::string text(uintptr_t address, size_t limit=128) const;
     std::string type(uintptr_t entity);
     bool attach();
+    bool read_projection(Snapshot& result) const;
     void detach();
     void clear_map_cache();
     std::string loaded_arena(uint64_t now);
@@ -106,5 +115,6 @@ private:
     bool anchor(uintptr_t scene, Player& player,bool skeleton=false);
     bool extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& target);
     WeaponProfile weapon_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn);
+    HeroProfile hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn);
 };
 }

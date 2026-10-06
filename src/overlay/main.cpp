@@ -64,6 +64,7 @@ struct Settings {
     bool focus_players=true,focus_minions=false,focus_orbs=false;
     bool replay_focus=true,debug_focus=true;int focus_bone=1;
     float focus_speed=12.f,projectile_speed=30000.f;
+    bool sniper_speed_override=true;float sniper_focus_speed=12.f;
     bool free_focus=false,prediction=false,inherit_velocity=false,auto_speed=true;
     bool visible_only=true;
     bool focus_visuals=true;
@@ -78,6 +79,7 @@ void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     const ImVec4* colors[]={&s.green,&s.amber,&s.red};const char* names[]={"green","amber","red"};
     out<<"visible_only="<<s.visible_only<<'\n';
     out<<"focus_visuals="<<s.focus_visuals<<'\n';
+    out<<"sniper_speed_override="<<s.sniper_speed_override<<"\nsniper_focus_speed="<<s.sniper_focus_speed<<'\n';
     out<<"focus_area_mode="<<int(s.focus_area.mode)<<"\nfocus_fov_percent="<<s.focus_area.center_percent<<"\nfocus_radius_meters="<<s.focus_area.radius_meters<<'\n';
     for(int i=0;i<3;++i)out<<"show_focus_area_"<<i<<'='<<s.show_focus_area[i]<<'\n';
     out<<"transparent_frame="<<s.transparent_frame<<"\nframe_opacity="<<s.frame_opacity<<'\n';
@@ -87,7 +89,7 @@ void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     for(int i=0;i<3;++i) out<<names[i]<<'='<<colors[i]->x<<' '<<colors[i]->y<<' '<<colors[i]->z<<'\n';
 }
 Settings load(const std::filesystem::path& path=config_path()) {
-    Settings s;std::ifstream in(path); std::string line;
+    Settings s;std::ifstream in(path); std::string line;bool loaded_sniper_speed=false;
     while(std::getline(in,line)) {
         auto at=line.find('=');if(at==std::string::npos) continue;
         auto key=line.substr(0,at),value=line.substr(at+1);std::istringstream data(value);
@@ -106,6 +108,8 @@ Settings load(const std::filesystem::path& path=config_path()) {
         else if(key=="auto_speed") {int n{};if(data>>n)s.auto_speed=n!=0;}
         else if(key=="visible_only") {int n{};if(data>>n)s.visible_only=n!=0;}
         else if(key=="focus_visuals") {int n{};if(data>>n)s.focus_visuals=n!=0;}
+        else if(key=="sniper_speed_override") {int n{};if(data>>n)s.sniper_speed_override=n!=0;}
+        else if(key=="sniper_focus_speed") {float speed{};if(data>>speed&&std::isfinite(speed)){s.sniper_focus_speed=std::clamp(speed,1.f,120.f);loaded_sniper_speed=true;}}
         else if(key=="focus_area_mode") {int n{};if(data>>n)s.focus_area.mode=static_cast<FocusAreaMode>(std::clamp(n,0,2));}
         else if(key=="show_focus_area_0"||key=="show_focus_area_1"||key=="show_focus_area_2") {int n{};if(data>>n)s.show_focus_area[key.back()-'0']=n!=0;}
         else if(key=="skeletons") {int n{};if(data>>n)s.skeletons=n!=0;}
@@ -123,7 +127,8 @@ Settings load(const std::filesystem::path& path=config_path()) {
             if(color) {float r{},g{},b{};if(data>>r>>g>>b && std::isfinite(r)&&std::isfinite(g)&&std::isfinite(b)) *color={std::clamp(r,0.f,1.f),std::clamp(g,0.f,1.f),std::clamp(b,0.f,1.f),1};}
         }
     }
-    s.width=std::clamp(s.width,40.f,200.f);s.height=std::clamp(s.height,3.f,16.f);s.gap=std::clamp(s.gap,2.f,40.f);s.focus_speed=std::clamp(s.focus_speed,1.f,120.f);s.projectile_speed=std::clamp(s.projectile_speed,1000.f,100000.f);s.frame_opacity=std::clamp(s.frame_opacity,.4f,.9f);s.focus_area=valid_focus_area(s.focus_area);return s;
+    s.width=std::clamp(s.width,40.f,200.f);s.height=std::clamp(s.height,3.f,16.f);s.gap=std::clamp(s.gap,2.f,40.f);s.focus_speed=std::clamp(s.focus_speed,1.f,120.f);s.projectile_speed=std::clamp(s.projectile_speed,1000.f,100000.f);s.frame_opacity=std::clamp(s.frame_opacity,.4f,.9f);s.focus_area=valid_focus_area(s.focus_area);
+    if(!loaded_sniper_speed)s.sniper_focus_speed=s.focus_speed;return s;
 }
 bool show_focus_area(const Settings& settings){return settings.show_focus_area[int(valid_focus_area(settings.focus_area).mode)];}
 std::string escaped(const std::string& input) {
@@ -142,6 +147,8 @@ void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool
         <<",\"drawn_bars\":"<<bars<<",\"overlay_visible\":"<<(visible?"true":"false")<<",\"overlay_extended_style\":"<<style
         <<",\"foreground_pid\":"<<foreground_pid<<",\"settings_visible\":"<<(settings_visible?"true":"false")
         <<",\"practice\":"<<(s.practice?"true":"false")<<",\"match_mode\":"<<s.match_mode<<",\"game_mode\":"<<s.game_mode<<",\"replay\":"<<(s.replay?"true":"false")<<",\"target_hz\":"<<target_hz<<",\"render_fps\":"<<render_fps<<",\"sample_us\":"<<s.sample_us<<",\"sample_reads\":"<<s.read_calls
+        <<",\"hero\":{\"valid\":"<<(s.hero.valid?"true":"false")<<",\"id\":"<<s.hero.id<<",\"name\":\""<<escaped(s.hero.name)<<"\",\"token\":\""<<escaped(s.hero.token)<<"\",\"sniper_present\":"<<(s.hero.sniper_present?"true":"false")<<",\"sniper_valid\":"<<(s.hero.sniper_valid?"true":"false")<<",\"sniper_scoped\":"<<(s.hero.sniper_scoped?"true":"false")<<",\"scope_start\":"<<s.hero.scope_start<<",\"ability_status\":\""<<escaped(s.hero.ability_status)<<"\"}"
+        <<",\"projection\":{\"source\":\"final_render_view\",\"valid\":"<<(s.projection.valid?"true":"false")<<",\"horizontal_fov\":"<<s.projection.horizontal_fov<<",\"vertical_fov\":"<<s.projection.vertical_fov<<",\"aspect\":"<<s.projection.aspect<<"}"
         <<",\"overlay_rect\":["<<bounds.left<<','<<bounds.top<<','<<bounds.right<<','<<bounds.bottom<<"],\"players\":[";
     bool first=true;for(const auto& p:s.players) {if(!first)out<<',';first=false;
         out<<"{\"handle\":"<<p.handle<<",\"team\":"<<unsigned(p.team)<<",\"health\":"<<p.health<<",\"maximum\":"<<p.maximum<<",\"anchor\":\""<<p.anchor
@@ -175,6 +182,31 @@ int self_test() {
     check(project(m,{0,0,0},1920,1080,p)&&p.x==960&&p.y==540);
     check(project(m,{-1,1,0},1920,1080,p)&&p.x==0&&p.y==0);
     check(!project(m,{2,0,0},1920,1080,p));
+    {
+    Matrix perspective{};perspective[0]=1;perspective[5]=16.f/9;perspective[10]=perspective[14]=1;
+    auto projection=projection_info(perspective);
+    check(projection.valid&&std::abs(projection.horizontal_fov-90)<.001f&&std::abs(projection.aspect-16.f/9)<.001f);
+    auto zoom_projection=perspective;zoom_projection[0]*=2;zoom_projection[5]*=2;
+    auto zoom_info=projection_info(zoom_projection);check(zoom_info.valid&&zoom_info.horizontal_fov<projection.horizontal_fov&&zoom_info.vertical_fov<projection.vertical_fov);
+    auto overridden=perspective;overridden[5]=2.3f;check(std::abs(projection_info(overridden).aspect-2.3f)<.001f);
+    ScreenPoint final_point{},legacy_point{};
+    check(project(perspective,{.1f,.2f,1},1920,1080,final_point)&&project(overridden,{.1f,.2f,1},1920,1080,legacy_point)
+        &&final_point.x==legacy_point.x&&final_point.y>legacy_point.y);
+    auto scaled=perspective;for(auto& value:scaled)value*=3;check(std::abs(projection_info(scaled).horizontal_fov-90)<.001f);
+    auto torn=perspective;torn[4]=.2f;check(!projection_info(torn).valid);torn=perspective;torn[3]=NAN;check(!projection_info(torn).valid);
+    check(!projection_info(Matrix{}).valid);
+    HeroProfile detected;detected.valid=true;detected.id=3;detected.token="hero_hornet";
+    check(vindicta(detected)&&hero_token("#hero_hornet_sort")=="hero_hornet"&&hero_token("#hero_orion_search")=="hero_orion");
+    check(hero_token("#wrong").empty()&&hero_token("hero_<bad>").empty());
+    detected.sniper_present=detected.sniper_valid=detected.sniper_scoped=true;
+    check(hero_focus_speed(detected,true,16,40)==40&&hero_focus_speed(detected,false,16,40)==16);
+    detected.sniper_scoped=false;check(hero_focus_speed(detected,true,16,40)==16);
+    detected.sniper_scoped=true;detected.sniper_valid=false;check(hero_focus_speed(detected,true,16,40)==16);
+    detected.sniper_valid=true;detected.id=4;check(hero_focus_speed(detected,true,16,40)==16);
+    detected.id=3;detected.valid=false;check(hero_focus_speed(detected,true,16,40)==16);
+    check(!sniper_scope(0)&&!sniper_scope(NAN)&&!sniper_scope(-1)&&sniper_scope(10));
+    check(hero_focus_speed({},true,999,40)==120&&hero_focus_speed({},true,NAN,40)==12);
+    }
     m[15]=-1;check(!project(m,{0,0,0},1920,1080,p));
     m[15]=0.0001f;check(!project(m,{0,0,0},1920,1080,p));
     m[15]=1;check(!project(m,{NAN,0,0},1920,1080,p));check(!project(m,{0,0,0},0,1080,p));
@@ -251,7 +283,9 @@ check(camera_mode_allowed(false,false,true));
     depth_line[0].z=-1;check(!closest_focus_line(depth_matrix,depth_line,1000,1000,{500,500},nearest));
     check(skeleton_bone("arm_upper_L")&&skeleton_bone("pelvis")&&!skeleton_bone("finger_index_L")&&!skeleton_bone("spine_2_TWIST"));
     auto links=skeleton_edges({"pelvis","HLPR","head","weapon_hand_R"},{-1,0,1,2});
-    check(links.size()==1&&links[0]==std::pair<int,int>{0,2});
+    check(links.empty());
+    auto anatomy=skeleton_edges({"pelvis","spine_2","neck","head","head_end","arm_upper_L"},{-1,0,1,2,3,2});
+    check(anatomy==std::vector<std::pair<int,int>>{{0,1},{1,2},{3,4},{2,5}});
     check(skeleton_edges({"head","pelvis"},{-1}).empty());check(skeleton_edges({"head","helper"},{1,1}).empty());
     check(extra_target_kind(".?AVCItemXP@@")==TargetKind::SoulOrb);check(extra_target_kind(".?AVC_NPC_Trooper@@")==TargetKind::Minion);
     check(extra_target_kind(".?AVC_NPC_TrooperNeutral@@")==TargetKind::Minion);check(extra_target_kind(".?AVC_NPC_TrooperBoss@@")==TargetKind::None);
@@ -360,6 +394,13 @@ check(camera_mode_allowed(false,false,true));
     check(restored.focus_area==area_settings.focus_area&&restored.show_focus_area==area_settings.show_focus_area&&!restored.focus_visuals);
     {std::ofstream bad(area_settings_path);bad<<"focus_area_mode=99\nfocus_fov_percent=-5\nfocus_radius_meters=999\n";}
     restored=load(area_settings_path);check(restored.focus_area.mode==FocusAreaMode::TargetCircle2D&&restored.focus_area.center_percent==1&&restored.focus_area.radius_meters==50);
+    Settings hero_settings;hero_settings.focus_speed=17;hero_settings.sniper_focus_speed=42;hero_settings.sniper_speed_override=false;
+    save(hero_settings,area_settings_path);restored=load(area_settings_path);
+    check(restored.focus_speed==17&&restored.sniper_focus_speed==42&&!restored.sniper_speed_override);
+    {std::ofstream legacy(area_settings_path);legacy<<"focus_speed=19\n";}
+    restored=load(area_settings_path);check(restored.sniper_focus_speed==19&&restored.sniper_speed_override);
+    {std::ofstream bad(area_settings_path);bad<<"sniper_focus_speed=999\n";}
+    check(load(area_settings_path).sniper_focus_speed==120);
     check(valid_weapon_numbers(25984.3f,60,0,0));
     check(!valid_weapon_numbers(NAN,60,0,0));check(!valid_weapon_numbers(10000,0,0,.1f));
     check(!valid_weapon_numbers(10000,-100,0,0));check(!valid_weapon_numbers(10000,0,3,0));
@@ -716,6 +757,28 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
     } else if(page==shell_page::camera) {
         ImRect status(origin+px(0,60),{body.Max.x,origin.y+px(210)});card(status,"FOCUS INPUT",icons::id::crosshair_simple);
         badge("input_ready",dl,status.Min+px(20,51),app.makcu.ready()?"Makcu ready":"Waiting for input",app.makcu.ready()?badge_good:badge_warn);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",app.makcu.status().c_str());
+        ImGui::SetCursorScreenPos(status.Min+px(180,47));
+        if(ImGui::Button("Hero / abilities",px(140,30)))ImGui::OpenPopup("Hero ability settings");
+        ImGui::SetNextWindowSizeConstraints(px(370,0),px(440,FLT_MAX));
+        if(ImGui::BeginPopup("Hero ability settings")) {
+            ImGui::Text("Detected hero: %s",snap.hero.name.c_str());
+            if(snap.hero.valid)ImGui::Text("Hero ID: %d",snap.hero.id);
+            ImGui::TextWrapped("%s",snap.hero.ability_status.c_str());
+            ImGui::Separator();
+            changed|=ImGui::Checkbox("Vindicta sniper speed override",&app.settings.sniper_speed_override);
+            ImGui::BeginDisabled(!app.settings.sniper_speed_override);
+            ImGui::SetNextItemWidth(px(330));
+            changed|=ImGui::SliderFloat("##sniper_focus_speed",&app.settings.sniper_focus_speed,1.f,120.f,"Sniper focus speed: %.0f");
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Uses this camera-focus speed while Vindicta is scoped with Assassinate. Unscoping or changing hero restores your regular focus speed.");
+            ImGui::Separator();
+            if(snap.projection.valid) {
+                ImGui::Text("Live view: %.1f x %.1f degrees",snap.projection.horizontal_fov,snap.projection.vertical_fov);
+                ImGui::Text("Render aspect ratio: %.3f",snap.projection.aspect);
+            }else ImGui::TextUnformatted("Waiting for the game's render view");
+            ImGui::EndPopup();
+        }
         ImGui::SetCursorScreenPos({status.Max.x-px(305),status.Min.y+px(47)});
         if(ImGui::Button("Focus area",px(120,30)))ImGui::OpenPopup("Focus area settings");
         text({status.Max.x-px(165),status.Min.y+px(53)},"Show FOV",true,14);
@@ -743,7 +806,9 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             ImGui::TextWrapped("Closest to the crosshair wins. Equal distances prefer lower health, then a random target. A valid selection stays locked while held.");
             ImGui::EndPopup();
         }
-        text(status.Min+px(20,88),app.makcu.status().c_str(),true,14);
+        char hero_label[200]{};
+        snprintf(hero_label,sizeof(hero_label),"Hero: %s%s",snap.hero.name.c_str(),vindicta(snap.hero)?(snap.hero.sniper_valid?(snap.hero.sniper_scoped?"  /  Assassinate scoped":"  /  Assassinate idle"):"  /  Waiting for sniper state"):"");
+        text(status.Min+px(20,88),hero_label,true,14);
         char area_hint[160]{};
         if(app.settings.focus_area.mode==FocusAreaMode::CenterFov)snprintf(area_hint,sizeof(area_hint),"Hold either side button. Center FOV radius: %.1f%% of the shorter screen dimension.",app.settings.focus_area.center_percent);
         else snprintf(area_hint,sizeof(area_hint),"Hold either side button. %s around selected bone: %.1f m radius.",app.settings.focus_area.mode==FocusAreaMode::TargetBox3D?"3D box":"2D circle",app.settings.focus_area.radius_meters);
@@ -761,7 +826,9 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         changed|=switch_toggle("free_focus",{body.Max.x-px(70),origin.y+px(278)},&app.settings.free_focus);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Hold a side button and move along head -> body -> pelvis.\nCorrections aim at the nearest point on that line; endpoints clamp movement.\nSoul orbs always use their center.");
         text(origin+px(20,317),"Focus speed",true,14);
-        auto speed_label=std::to_string(int(app.settings.focus_speed));text({body.Max.x-px(45),origin.y+px(317)},speed_label.c_str(),false,14);
+        auto scoped_speed=sniper_speed_active(snap.hero,app.settings.sniper_speed_override);
+        auto speed_label=std::to_string(int(hero_focus_speed(snap.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed)))+(scoped_speed?" (sniper)":"");
+        text({body.Max.x-px(scoped_speed?130.f:45.f),origin.y+px(317)},speed_label.c_str(),false,14);
         changed|=range_slider("focus_speed",origin+px(20,341),body.GetWidth()-px(40),&app.settings.focus_speed,1.f,120.f);
         text(origin+px(20,379),"Prediction",true,14);
         changed|=switch_toggle("prediction",origin+px(170,382),&app.settings.prediction);
@@ -822,7 +889,10 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         text(map.Min+px(20,76),snap.visibility_status.c_str(),true,12);
         char mesh[128]{};snprintf(mesh,sizeof(mesh),"%zu triangles / %.3f ms checks",snap.visibility?snap.visibility->triangle_count():0,snap.visibility_us/1000);
         text(map.Min+px(20,103),mesh,true,12);
-        text(map.Min+px(20,130),snap.camera_valid?"Camera projection ready":"Waiting for camera projection",true,12);
+        char projection_label[120]{};
+        if(snap.projection.valid)snprintf(projection_label,sizeof(projection_label),"View %.1f x %.1f deg / aspect %.3f",snap.projection.horizontal_fov,snap.projection.vertical_fov,snap.projection.aspect);
+        else snprintf(projection_label,sizeof(projection_label),"Waiting for camera projection");
+        text(map.Min+px(20,130),projection_label,true,12);
         text(input.Min+px(20,47),app.makcu.status().c_str(),false,12);
         char targets[128]{};int minions=0,orbs=0;
         for(const auto& target:snap.focus_targets)if(target.kind==TargetKind::Minion)++minions;else if(target.kind==TargetKind::SoulOrb)++orbs;
@@ -948,6 +1018,7 @@ int render_test() {
             && SendMessageW(app.settings_window.hwnd,WM_MOUSEACTIVATE,0,0)==MA_ACTIVATE
             && SendMessageW(app.bar_window.hwnd,WM_NCHITTEST,0,0)==HTTRANSPARENT;
         Snapshot s;s.status="Connected to validated client.dll";s.pid=6248;s.controllers=3;s.players.resize(2);
+        s.hero.valid=true;s.hero.id=3;s.hero.name="Vindicta";s.hero.token="hero_hornet";s.hero.sniper_present=s.hero.sniper_valid=s.hero.sniper_scoped=true;s.hero.ability_status="Assassinate scoped";s.projection={true,71.1f,43.8f,16.f/9};
         // Two frames allow the dynamic font atlas to upload fonts first requested by widgets.
         ok=ok&&app.settings_window.panel_shader&&app.settings_window.glass_shader;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;ImGui::GetIO().MousePos={960.f+float(i),500.f};draw_settings(app,s);render_frame(app.settings_window);}}
@@ -966,6 +1037,17 @@ int render_test() {
         app.settings.transparent_frame=true;app.menu_page=solace::shell_page::camera;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
         if(ok)ok=capture(app.settings_window,executable_directory()/L"transparent-camera-preview.png",true);
+        // Exercise the hero popup without sending input to the desktop/game.
+        for(int i=0;i<8&&ok;++i) {
+            ImGui::GetIO().AddMousePosEvent(solace::px(549),solace::px(234));
+            if(i==1||i==2)ImGui::GetIO().AddMouseButtonEvent(0,i==1);
+            ok=begin_frame(app.settings_window);
+            if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}
+        }
+        if(ok)ok=ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&capture(app.settings_window,executable_directory()/L"hero-abilities-preview.png",true);
+        ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape,true);
+        if(ok){ok=begin_frame(app.settings_window);if(ok){draw_settings(app,s);render_frame(app.settings_window);}}
+        ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape,false);
         // Open the area popup through ImGui input without touching the desktop mouse.
         for(int i=0;i<8&&ok;++i) {
             ImGui::GetIO().AddMousePosEvent(solace::px(846),solace::px(234));
@@ -1102,7 +1184,8 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         foreground=GetForegroundWindow();
         focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd);
         app.read_options.store((app.settings.skeletons?1u:0u)|(app.settings.focus_minions?2u:0u)|(app.settings.focus_orbs?4u:0u));
-        app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,app.settings.focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms());
+        auto focus_speed=hero_focus_speed(snapshot.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed);
+        app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms());
         app.sampling=focused;
         // Input and foreground checks run before GPU pacing. A saturated queue is
         // polled with a bounded wait, without dropping a prepared render frame.
@@ -1193,7 +1276,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
                 <<",\"status\":\""<<escaped(app.makcu.status())<<"\",\"commands_sent\":"<<app.makcu.sent()
                 <<",\"write_failures\":"<<app.makcu.failures()<<",\"superseded_commands\":"<<app.makcu.replaced()
                 <<",\"free_movement_available\":true,\"free_movement_mode\":\"closest_line\"}\n";
-            std::ofstream camera_report(executable_directory()/L"camera.json");camera_report<<"{\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(app.settings.debug_focus?"true":"false")<<",\"enabled\":"<<(app.settings.replay_focus?"true":"false")<<",\"speed\":"<<app.settings.focus_speed<<",\"bone\":"<<app.settings.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"free_movement\":"<<(app.settings.free_focus?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(app.settings.prediction?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.settings.auto_speed?snapshot.weapon.speed:app.settings.projectile_speed)<<",\"auto_speed\":"<<(app.settings.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(app.settings.focus_area.mode)<<",\"focus_fov_percent\":"<<app.settings.focus_area.center_percent<<",\"focus_radius_meters\":"<<app.settings.focus_area.radius_meters<<",\"show_focus_area\":"<<(show_focus_area(app.settings)?"true":"false")<<"}\n";
+            std::ofstream camera_report(executable_directory()/L"camera.json");camera_report<<"{\"effective_speed\":"<<focus_speed<<",\"sniper_speed_active\":"<<(sniper_speed_active(snapshot.hero,app.settings.sniper_speed_override)?"true":"false")<<",\"sniper_focus_speed\":"<<app.settings.sniper_focus_speed<<",\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(app.settings.debug_focus?"true":"false")<<",\"enabled\":"<<(app.settings.replay_focus?"true":"false")<<",\"speed\":"<<app.settings.focus_speed<<",\"bone\":"<<app.settings.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"free_movement\":"<<(app.settings.free_focus?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(app.settings.prediction?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.settings.auto_speed?snapshot.weapon.speed:app.settings.projectile_speed)<<",\"auto_speed\":"<<(app.settings.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(app.settings.focus_area.mode)<<",\"focus_fov_percent\":"<<app.settings.focus_area.center_percent<<",\"focus_radius_meters\":"<<app.settings.focus_area.radius_meters<<",\"show_focus_area\":"<<(show_focus_area(app.settings)?"true":"false")<<"}\n";
             if(timing_frames){std::ofstream perf(executable_directory()/L"frame-performance.json");perf<<"{\"frames\":"<<timing_frames<<",\"priority_class\":"<<GetPriorityClass(GetCurrentProcess())<<",\"composition\":"<<(app.bar_window.renderer.composition()?"true":"false")<<",\"busy_bar_presents\":"<<app.bar_window.busy_presents<<",\"busy_menu_presents\":"<<app.settings_window.busy_presents<<",\"menu_open\":"<<(app.show_settings?"true":"false")<<",\"work_ms\":"<<work_sum/timing_frames<<",\"submit_ms\":"<<submit_sum/timing_frames<<",\"present_ms\":"<<present_sum/timing_frames<<",\"queue_wait_ms\":"<<queue_wait_sum/timing_frames<<",\"wait_ms\":"<<wait_sum/timing_frames<<",\"max_work_ms\":"<<work_max<<",\"max_present_ms\":"<<present_max<<",\"reader_ms\":"<<snapshot.sample_us/1000<<"}\n";}
             work_sum=wait_sum=submit_sum=present_sum=queue_wait_sum=work_max=present_max=0;timing_frames=0;
             std::ofstream trace(executable_directory()/L"frame-trace.json");trace<<"{\"status\":\""<<escaped(app.frame_status)<<"\",\"enabled\":"<<(trace_frames?"true":"false")<<",\"error\":"<<game_frames.error()<<",\"events\":"<<game_frames.count()<<",\"delivery_delay_ms\":"<<game_frames.delay_ms()<<"}\n";last_report=now;}

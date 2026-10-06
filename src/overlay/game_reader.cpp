@@ -82,6 +82,7 @@ void GameReader::detach() {
     if (process_) CloseHandle(process_);
     process_=nullptr; pid_=0; base_=entity_slot_=matrix_address_=engine_base_=world_renderer_base_=0;
     types_.clear(); models_.clear(); controllers_.clear();extras_.clear(); next_enumerate_=0;
+    hero_names_.clear();heroes_.clear();ability_handles_.clear();ability_pawn_=0;sniper_handle_=UINT32_MAX;
     velocities_.clear();local_motion_={};local_handle_=0;
     visibility_.reset();visibility_map_.clear();next_visibility_load_=0;
     clear_map_cache();map_resolution_status_.clear();
@@ -145,7 +146,40 @@ bool GameReader::attach() {
     if (matches!=1 || entity_slot_-base_!=0x3bf3bc0 || matrix_address_-base_!=0x3c28c60) {
         status_="Resolved addresses differ from validated profile";detach();return false;
     }
+    // ScreenTransform uses the legacy CViewSetup aspect override. The actual
+    // renderer uses CViewRender's compact view at +0x10, whose final world-to-clip
+    // matrix is +0x288. Its native horizontal FOV already includes zoom/overrides.
+    // CViewRender ctor client+0x092B90, matrix product client+0x2165A60.
+    if(pointer(base_+0x3644d60)!=base_+0x2655aa0) {
+        status_="Cannot validate final render view";detach();return false;
+    }
+    matrix_address_=base_+0x3644d60+0x298;
+    // Hero IDs and names come from the current game's hero table and localization,
+    // rather than a list that becomes stale when heroes are added or renamed.
+    auto game_directory=std::filesystem::path(path).parent_path().parent_path().parent_path();
+    std::ifstream names(game_directory/L"resource/localization/citadel_gc_hero_names/citadel_gc_hero_names_english.txt");
+    std::string line;
+    while(std::getline(names,line)&&hero_names_.size()<1024) {
+        std::istringstream tokens(line);std::string key,value;
+        if(!(tokens>>std::quoted(key)>>std::quoted(value))||!key.starts_with("hero_")||value.empty()||value.size()>128)continue;
+        if(key.ends_with(":n"))key.resize(key.size()-2);
+        hero_names_.try_emplace(std::move(key),std::move(value));
+    }
     status_="Connected to validated client.dll"; return true;
+}
+bool GameReader::read_projection(Snapshot& result) const {
+    const auto view=base_+0x3644d60;
+    for(int attempt=0;attempt<3;++attempt) {
+        uint8_t updating{},after{};std::array<float,8> camera{};
+        if(!read(view+0x1330,updating)||updating)continue;
+        if(!read(matrix_address_,result.matrix)||!read(view+0x10,camera)||!read(view+0x1330,after)||after)continue;
+        auto info=projection_info(result.matrix);
+        // Reject a partial update rather than combining two different views.
+        if(!info.valid||!std::isfinite(camera[6])||!std::isfinite(camera[7])
+            ||std::abs(info.horizontal_fov-camera[6])>.25f||std::abs(info.aspect-camera[7])>.005f)continue;
+        result.projection=info;return true;
+    }
+    return false;
 }
 void GameReader::clear_map_cache() {
     loaded_map_.clear();map_array_=map_rep_=map_world_=map_path_=0;map_count_=0;map_index_=-1;next_map_resolve_=0;
@@ -293,6 +327,76 @@ bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& 
     target.dots.fill(world);target.dot_valid.fill(true);
     return true;
 }
+HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
+    HeroProfile result;
+    if(type(pawn.address)!=".?AVC_CitadelPlayerPawn@@")return result;
+    // CCitadelHeroComponent::GetHeroData, client+0x766430: spawned, loading,
+    // then no-spawn ID. CitadelHeroSpawnData_t has a vtable before its ID.
+    std::array<unsigned char,0x40> component{},again{};
+    if(!read(pawn.address+0x1620,component))return result;
+    for(auto offset:{0x20,0x30,0x38}) {
+        int id{};std::memcpy(&id,component.data()+offset,4);
+        if(id){result.id=id;break;}
+    }
+    std::array<uintptr_t,2> table{}; // count/padding and data; cache capacity follows.
+    if(result.id<=0||!read(base_+0x36a91f8,table))return result;
+    auto count=uint32_t(table[0]);auto array=table[1];
+    if(count>1024||uint32_t(result.id)>=count||!array)return result;
+    auto record=pointer(array+size_t(result.id)*8);int record_id{};
+    if(!record||!read(record+0x28,record_id)||record_id!=result.id)return result;
+    auto cached=heroes_.find(result.id);
+    if(cached==heroes_.end()||cached->second.address!=record) {
+        if(heroes_.size()>=256)heroes_.clear();
+        auto sort=text(pointer(record+0x30),100);auto token=hero_token(sort);
+        if(token.empty())token=hero_token(text(pointer(record+0x38),100));
+        if(token.empty())return result;
+        auto label=hero_names_.find(token);
+        if(label==hero_names_.end())label=hero_names_.find(token+"_sort");
+        if(label==hero_names_.end())label=hero_names_.find(token+"_search");
+        auto name=label!=hero_names_.end()?label->second:"Hero "+std::to_string(result.id);
+        cached=heroes_.insert_or_assign(result.id,HeroMetadata{record,std::move(name),std::move(token)}).first;
+    }
+    result.name=cached->second.name;result.token=cached->second.token;result.valid=true;
+    result.ability_status="No hero-specific focus profile";
+    if(vindicta(result)) {
+        result.ability_status="Waiting for Assassinate";
+        auto abilities=pawn.address+0x1440+0x68;
+        std::array<unsigned char,24> header{},header_after{};
+        int size{};uint32_t capacity{};uintptr_t data{};
+        if(read(abilities,header)) {
+            std::memcpy(&size,header.data(),4);std::memcpy(&data,header.data()+8,8);std::memcpy(&capacity,header.data()+16,4);capacity&=0x7fffffff;
+            if(size>0&&size<=128&&capacity>=uint32_t(size)&&capacity<=128&&data) {
+                std::vector<uint32_t> handles(size);
+                if(read(data,handles.data(),handles.size()*4)&&read(abilities,header_after)&&header==header_after) {
+                    if(ability_pawn_!=pawn.address||handles!=ability_handles_) {
+                        ability_pawn_=pawn.address;ability_handles_=handles;sniper_handle_=UINT32_MAX;
+                        for(auto handle:handles) {
+                            auto ability=entity(chunks,handle);
+                            if(ability.address&&type(ability.address)==".?AVCCitadel_Ability_Hornet_Snipe@@") {sniper_handle_=handle;break;}
+                        }
+                    }
+                    auto sniper=entity(chunks,sniper_handle_);
+                    if(sniper.address&&type(sniper.address)==".?AVCCitadel_Ability_Hornet_Snipe@@") {
+                        result.sniper_present=true;result.sniper_handle=sniper_handle_;
+                        // The actual game tests != 0 here and clears it on unscope:
+                        // scope client+0xF80670, unscope client+0xF9C8D0.
+                        float after{};
+                        if(read(sniper.address+0x1fe4,result.scope_start)&&std::isfinite(result.scope_start)&&result.scope_start>=0
+                            &&read(sniper.address+0x1fe4,after)&&after==result.scope_start
+                            &&entity(chunks,sniper_handle_).address==sniper.address) {
+                            result.sniper_valid=true;result.sniper_scoped=sniper_scope(result.scope_start);
+                            result.ability_status=result.sniper_scoped?"Assassinate scoped":"Assassinate idle";
+                        }else result.ability_status="Waiting for stable sniper state";
+                    }
+                }
+            }
+        }
+    }else {ability_pawn_=0;sniper_handle_=UINT32_MAX;ability_handles_.clear();}
+    std::array<uintptr_t,2> table_after{};
+    if(!read(pawn.address+0x1620,again)||again!=component||!read(base_+0x36a91f8,table_after)||table_after!=table
+        ||pointer(array+size_t(result.id)*8)!=record||entity(chunks,pawn.handle).address!=pawn.address)return {};
+    return result;
+}
 WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
     WeaponProfile result;
     if(type(pawn.address).find("CitadelPlayerPawn")==std::string::npos)return result;
@@ -395,8 +499,7 @@ Snapshot GameReader::sample(ReadOptions options) {
     }
     result.practice=result.practice||result.map_name=="hero_testing"||result.map_name=="new_player_basics"||result.map_name=="fx_test";
     auto system=pointer(entity_slot_);
-    if (!system || !read(matrix_address_,result.matrix)) {result.status="Waiting for a loaded match";return result;}
-    for (auto value:result.matrix) if (!std::isfinite(value)) {result.status="Invalid projection matrix";return result;}
+    if (!system || !read_projection(result)) {result.status="Waiting for a stable render view";return result;}
     auto now=GetTickCount64();
     const auto map_key=visibility_map_key(result.map_name);
     if(map_key!=visibility_map_){visibility_.reset();visibility_map_=map_key;next_visibility_load_=0;}
@@ -415,8 +518,7 @@ Snapshot GameReader::sample(ReadOptions options) {
     result.visibility=visibility_;result.visibility_status=map_key.empty()?(result.map_source=="loaded_arena_world"?map_resolution_status_:"Waiting for map name"):visibility_status_;
     // Loading/building a mesh can take time. Refresh camera data before publishing a fresh sample.
     now=GetTickCount64();
-    if(!read(matrix_address_,result.matrix)){result.status="Cannot read projection matrix";return result;}
-    for(auto value:result.matrix)if(!std::isfinite(value)){result.status="Invalid projection matrix";return result;}
+    if(!read_projection(result)){result.status="Waiting for a stable render view";return result;}
     result.camera_valid=camera_origin(result.matrix,result.camera_position);
     if (now>=next_enumerate_) {if (!enumerate(system)) {result.status="Cannot read entity list";return result;} next_enumerate_=now+((options.minions||options.orbs)?100:1000);}
     result.controllers=static_cast<int>(controllers_.size());
@@ -430,6 +532,7 @@ Snapshot GameReader::sample(ReadOptions options) {
         std::memcpy(&handle,controller_fields.data(),4);
         auto pawn=entity(chunks,handle);if (!pawn.address) {++result.invalid_handles;continue;}
         if(controller_fields[0xd4]) {
+            result.hero=hero_profile(chunks,pawn);
             result.weapon=weapon_profile(chunks,pawn);
             uint8_t team{};
             if(read(pawn.address+0x3ef,team)&&entity(chunks,handle).address==pawn.address)result.local_team=team;
@@ -439,7 +542,7 @@ Snapshot GameReader::sample(ReadOptions options) {
                 local_motion_.update(local.dots[2],now);result.local_velocity=local_motion_.velocity;result.local_velocity_valid=local_motion_.valid;
             }else local_motion_={};
             uint32_t current_handle{};
-            if(!read(controller.address+0x6bc,current_handle)||current_handle!=handle){result.weapon={};result.local_velocity_valid=false;local_motion_={};}
+            if(!read(controller.address+0x6bc,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.local_velocity_valid=false;local_motion_={};}
             continue;
         }
         if (type(pawn.address).find("CitadelPlayerPawn")==std::string::npos) continue;
