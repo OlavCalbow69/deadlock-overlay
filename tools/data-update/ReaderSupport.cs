@@ -19,6 +19,8 @@ static class ReaderSupport {
         ("CGameSceneNode", "m_vecAbsOrigin", 0xc8),
         ("CGameSceneNode", "m_bDormant", 0x103),
         ("CSkeletonInstance", "m_modelState", 0x140),
+        ("CSkeletonInstance", "m_nHitboxSet", 0x40c),
+        ("C_BaseModelEntity", "m_bvDisabledHitGroups", 0xb98),
         ("CCollisionProperty", "m_vecMins", 0x40),
         ("CCollisionProperty", "m_vecMaxs", 0x4c),
         ("C_CitadelPlayerPawn", "m_CCitadelHeroComponent", 0x1620),

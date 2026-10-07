@@ -59,7 +59,7 @@ struct Settings {
     bool enabled=true, numbers=true,glass=true,dark=true,exclude_teammates=false;
     bool transparent_frame=true;float frame_opacity=.72f;
     bool head_dot=false,body_dot=false,pelvis_dot=false;
-    bool skeletons=false;
+    bool skeletons=false,hitboxes=false;
     ImVec4 skeleton_visible{.2f,.62f,1.f,1.f},skeleton_hidden{.68f,.32f,1.f,1.f};
     bool focus_players=true,focus_minions=false,focus_orbs=false;
     bool replay_focus=true,debug_focus=true;int focus_bone=1;
@@ -84,6 +84,7 @@ void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     for(int i=0;i<3;++i)out<<"show_focus_area_"<<i<<'='<<s.show_focus_area[i]<<'\n';
     out<<"transparent_frame="<<s.transparent_frame<<"\nframe_opacity="<<s.frame_opacity<<'\n';
     out<<"skeletons="<<s.skeletons<<"\nfocus_players="<<s.focus_players<<"\nfocus_minions="<<s.focus_minions<<"\nfocus_orbs="<<s.focus_orbs<<'\n';
+    out<<"hitboxes="<<s.hitboxes<<'\n';
     out<<"skeleton_visible="<<s.skeleton_visible.x<<' '<<s.skeleton_visible.y<<' '<<s.skeleton_visible.z<<'\n';
     out<<"skeleton_hidden="<<s.skeleton_hidden.x<<' '<<s.skeleton_hidden.y<<' '<<s.skeleton_hidden.z<<'\n';
     for(int i=0;i<3;++i) out<<names[i]<<'='<<colors[i]->x<<' '<<colors[i]->y<<' '<<colors[i]->z<<'\n';
@@ -113,6 +114,7 @@ Settings load(const std::filesystem::path& path=config_path()) {
         else if(key=="focus_area_mode") {int n{};if(data>>n)s.focus_area.mode=static_cast<FocusAreaMode>(std::clamp(n,0,2));}
         else if(key=="show_focus_area_0"||key=="show_focus_area_1"||key=="show_focus_area_2") {int n{};if(data>>n)s.show_focus_area[key.back()-'0']=n!=0;}
         else if(key=="skeletons") {int n{};if(data>>n)s.skeletons=n!=0;}
+        else if(key=="hitboxes") {int n{};if(data>>n)s.hitboxes=n!=0;}
         else if(key=="focus_players") {int n{};if(data>>n)s.focus_players=n!=0;}
         else if(key=="focus_minions") {int n{};if(data>>n)s.focus_minions=n!=0;}
         else if(key=="focus_orbs") {int n{};if(data>>n)s.focus_orbs=n!=0;}
@@ -138,13 +140,14 @@ void visibility_report(const Snapshot& s,const std::filesystem::path& path,bool 
     std::ofstream out(path);out<<"{\"enabled\":"<<(enabled?"true":"false")<<",\"map\":\""<<escaped(s.map_name)<<"\",\"level\":\""<<escaped(s.level_name)<<"\",\"map_source\":\""<<escaped(s.map_source)<<"\",\"status\":\""<<escaped(s.visibility_status)<<"\",\"triangles\":"<<(s.visibility?s.visibility->triangle_count():0)<<",\"ray_ms\":"<<s.visibility_us/1000<<",\"camera_valid\":"<<(s.camera_valid?"true":"false")<<",\"camera_position\":["<<s.camera_position.x<<','<<s.camera_position.y<<','<<s.camera_position.z<<"],\"focus_occluded\":"<<(occluded?"true":"false")<<",\"players\":[";
     bool first=true;for(const auto& p:s.players){if(!first)out<<',';first=false;out<<"{\"handle\":"<<p.handle<<",\"visible\":"<<(p.visible?"true":"false")<<",\"bones\":[";for(int i=0;i<3;++i){if(i)out<<',';out<<(p.dot_visible[i]?"true":"false");}out<<"]}";}out<<"]}\n";
 }
-void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool visible=false,LONG_PTR style=0,HWND overlay_window=nullptr,bool settings_visible=false,double target_hz=0,double render_fps=0) {
+void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool visible=false,LONG_PTR style=0,HWND overlay_window=nullptr,bool settings_visible=false,double target_hz=0,double render_fps=0,int drawn_hitboxes=0) {
     DWORD foreground_pid{};GetWindowThreadProcessId(GetForegroundWindow(),&foreground_pid);
     RECT bounds{};if(overlay_window)GetWindowRect(overlay_window,&bounds);
     std::ofstream out(path);out<<"{\n\"pid\":"<<s.pid<<",\"status\":\""<<escaped(s.status)<<"\",\"sample_time\":"<<s.time
         <<",\"map\":\""<<escaped(s.map_name)<<"\",\"level\":\""<<escaped(s.level_name)<<"\",\"map_source\":\""<<escaped(s.map_source)<<"\",\"visibility_status\":\""<<escaped(s.visibility_status)<<"\",\"triangles\":"<<(s.visibility?s.visibility->triangle_count():0)
         <<",\"controllers\":"<<s.controllers<<",\"local_team\":"<<unsigned(s.local_team)<<",\"invalid_handles\":"<<s.invalid_handles<<",\"missing_anchors\":"<<s.missing_anchors
         <<",\"drawn_bars\":"<<bars<<",\"overlay_visible\":"<<(visible?"true":"false")<<",\"overlay_extended_style\":"<<style
+        <<",\"drawn_hitboxes\":"<<drawn_hitboxes
         <<",\"foreground_pid\":"<<foreground_pid<<",\"settings_visible\":"<<(settings_visible?"true":"false")
         <<",\"practice\":"<<(s.practice?"true":"false")<<",\"match_mode\":"<<s.match_mode<<",\"game_mode\":"<<s.game_mode<<",\"replay\":"<<(s.replay?"true":"false")<<",\"target_hz\":"<<target_hz<<",\"render_fps\":"<<render_fps<<",\"sample_us\":"<<s.sample_us<<",\"sample_reads\":"<<s.read_calls
         <<",\"hero\":{\"valid\":"<<(s.hero.valid?"true":"false")<<",\"id\":"<<s.hero.id<<",\"name\":\""<<escaped(s.hero.name)<<"\",\"token\":\""<<escaped(s.hero.token)<<"\",\"sniper_present\":"<<(s.hero.sniper_present?"true":"false")<<",\"sniper_valid\":"<<(s.hero.sniper_valid?"true":"false")<<",\"sniper_scoped\":"<<(s.hero.sniper_scoped?"true":"false")<<",\"scope_start\":"<<s.hero.scope_start<<",\"ability_status\":\""<<escaped(s.hero.ability_status)<<"\"}"
@@ -155,7 +158,14 @@ void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool
             <<"\",\"world\":["<<p.head.x<<','<<p.head.y<<','<<p.head.z<<"],\"dots\":[";
         for(size_t i=0;i<3;++i){if(i)out<<',';if(p.dot_valid[i])out<<'['<<p.dots[i].x<<','<<p.dots[i].y<<','<<p.dots[i].z<<']';else out<<"null";}
         size_t visible_segments=0,unknown_segments=0;for(const auto& segment:p.skeleton){if(segment.visible)++visible_segments;if(!segment.visibility_known)++unknown_segments;}
-        out<<"],\"skeleton_segments\":"<<p.skeleton.size()<<",\"skeleton_visible\":"<<visible_segments<<",\"skeleton_unknown\":"<<unknown_segments<<",\"velocity_valid\":"<<(p.velocity_valid?"true":"false")<<",\"velocity\":["<<p.velocity.x<<','<<p.velocity.y<<','<<p.velocity.z<<"]}";
+        out<<"],\"skeleton_segments\":"<<p.skeleton.size()<<",\"skeleton_visible\":"<<visible_segments<<",\"skeleton_unknown\":"<<unknown_segments
+            <<",\"hitbox_set\":"<<p.hitbox_set<<",\"hitbox_status\":\""<<escaped(p.hitbox_status)<<"\",\"hitboxes\":[";
+        for(size_t i=0;i<p.hitboxes.size();++i) {
+            if(i)out<<',';const auto& box=p.hitboxes[i];
+            out<<"{\"shape\":"<<int(box.shape)<<",\"group\":"<<box.group<<",\"a\":["<<box.a.x<<','<<box.a.y<<','<<box.a.z<<"],\"b\":["<<box.b.x<<','<<box.b.y<<','<<box.b.z<<"],\"radius\":"<<box.radius
+                <<",\"visible\":"<<(box.visible?"true":"false")<<",\"visibility_known\":"<<(box.visibility_known?"true":"false")<<"}";
+        }
+        out<<"],\"velocity_valid\":"<<(p.velocity_valid?"true":"false")<<",\"velocity\":["<<p.velocity.x<<','<<p.velocity.y<<','<<p.velocity.z<<"]}";
     }
     out<<"],\"focus_targets\":[";first=true;
     for(const auto& target:s.focus_targets) {
@@ -643,6 +653,29 @@ void draw_skeleton(ImDrawList* draw,const Player& player,const Matrix& matrix,fl
         draw->AddLine({a.x,a.y},{b.x,b.y},color,1.7f*scale);
     }
 }
+int draw_hitboxes(ImDrawList* draw,const Player& player,const Matrix& matrix,float width,float height,const Settings& settings,float scale,ImVec2 offset={}) {
+    int drawn=0;
+    // Reject a whole offscreen shape before generating/clipping its wire mesh.
+    const auto plane_length=[&](int row,float sign) {
+        Vec3 n{matrix[12]+sign*matrix[row],matrix[13]+sign*matrix[row+1],matrix[14]+sign*matrix[row+2]};return std::sqrt(dot(n,n));
+    };
+    const float normals[]={std::sqrt(matrix[12]*matrix[12]+matrix[13]*matrix[13]+matrix[14]*matrix[14]),plane_length(0,1),plane_length(0,-1),plane_length(4,1),plane_length(4,-1)};
+    for(const auto& box:player.hitboxes) {
+        FocusClip clip;if(!focus_clip(matrix,hitbox_center(box),clip))continue;
+        auto axis=sub(box.b,box.a);float extent=.5f*std::sqrt(dot(axis,axis))+(box.shape==HitboxShape::Box?0:box.radius);
+        const float distance[]={clip.w-.0011f,clip.w+clip.x,clip.w-clip.x,clip.w+clip.y,clip.w-clip.y};
+        bool outside=false;for(int i=0;i<5;++i)if(distance[i]+extent*normals[i]<0){outside=true;break;}if(outside)continue;
+        auto color=box.visibility_known?ImGui::ColorConvertFloat4ToU32(box.visible?settings.skeleton_visible:settings.skeleton_hidden):IM_COL32(155,160,170,225);
+        bool submitted=false;
+        hitbox_segments(box,[&](Vec3 from,Vec3 to) {
+            ScreenPoint a{},b{};if(!focus_project_segment(matrix,from,to,width,height,a,b))return;
+            draw->AddLine(ImVec2{a.x,a.y}+offset,ImVec2{b.x,b.y}+offset,IM_COL32(5,8,15,190),2.8f*scale);
+            draw->AddLine(ImVec2{a.x,a.y}+offset,ImVec2{b.x,b.y}+offset,color,1.2f*scale);submitted=true;
+        });
+        if(submitted)++drawn;
+    }
+    return drawn;
+}
 void draw_focus_area(ImDrawList* draw,const Snapshot& snapshot,const Settings& settings,float width,float height,uint32_t selected,float scale) {
     if(!show_focus_area(settings)||width<=0||height<=0)return;
     const auto area=valid_focus_area(settings.focus_area);ScreenPoint center{width*.5f,height*.5f};
@@ -705,24 +738,26 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         };
         auto pos=controls.Min+px(20,56);float inner=left-px(40);
         toggle("draw_health",pos,"Health bars",app.settings.enabled,inner);
-        toggle("show_numbers",pos+px(0,36),"Health numbers",app.settings.numbers,inner);
-        toggle("exclude_teammates",pos+px(0,72),"Enemies only",app.settings.exclude_teammates,inner);
-        toggle("skeletons",pos+px(0,108),"Skeletons",app.settings.skeletons,inner);
+        toggle("show_numbers",pos+px(0,32),"Health numbers",app.settings.numbers,inner);
+        toggle("exclude_teammates",pos+px(0,64),"Enemies only",app.settings.exclude_teammates,inner);
+        toggle("skeletons",pos+px(0,96),"Skeletons",app.settings.skeletons,inner);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Bone segments: visible blue, blocked purple.\nSkeletons show both states; Visible only still gates health bars and focus.\nGray means no collision mesh / camera data.");
-        toggle("visible_only",pos+px(0,144),"Visible only",app.settings.visible_only,inner);
+        toggle("hitboxes",pos+px(0,128),"Hitboxes",app.settings.hitboxes,inner);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Model hitboxes follow animated bones: boxes, spheres and capsules.\nVisible/blocked colors below also apply here; gray means visibility is unknown.\nLike Skeletons, both visibility states are shown.");
+        toggle("visible_only",pos+px(0,160),"Visible only",app.settings.visible_only,inner);
         auto slider=[&](const char* id,const char* title,float& value,float low,float high,float y){
             auto at=controls.Min+px(20,y);text(at,title);auto number=std::to_string(int(value))+" px";
             draw_text(dl,font_semibold(14),{controls.Max.x-px(20)-text_width(font_semibold(14),number.c_str()),at.y},mo::with_alpha(c_foreground,alpha),number.c_str());
             changed|=range_slider(id,at+px(0,19),inner,&value,low,high);
         };
-        slider("width","Width",app.settings.width,40,200,235);slider("height","Height",app.settings.height,3,16,292);slider("gap","Head gap",app.settings.gap,2,40,349);
+        slider("width","Width",app.settings.width,40,200,260);slider("height","Height",app.settings.height,3,16,304);slider("gap","Head gap",app.settings.gap,2,40,348);
         text(controls.Min+px(20,395),"Health colors",true,12);
         ImGui::SetCursorScreenPos({controls.Max.x-px(138),controls.Min.y+px(390)});
         changed|=ImGui::ColorEdit3("##healthy",&app.settings.green.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);ImGui::SameLine();
         changed|=ImGui::ColorEdit3("##low",&app.settings.amber.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);ImGui::SameLine();
         changed|=ImGui::ColorEdit3("##critical",&app.settings.red.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);
         ImVec2 centre{preview.GetCenter().x,preview.Min.y+px(100)};
-        dl->PushClipRect(preview.Min+px(8,44),preview.Max-px(8,8),true);
+        dl->PushClipRect(preview.Min+px(8,44),{preview.Max.x-px(8),preview.Min.y+px(178)},true);
         auto silhouette=mo::with_alpha(c_muted_foreground,.22f*alpha);
         dl->AddCircleFilled(centre,px(15),silhouette,40);
         dl->AddRectFilled(centre+px(-27,24),centre+px(27,65),silhouette,px(16));
@@ -735,6 +770,14 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             constexpr std::array<ImVec2,19> joints={{{0,61},{0,38},{0,18},{0,0},{0,-12},{-16,28},{-26,30},{-35,50},{-38,69},{16,28},{26,30},{35,50},{38,69},{-13,64},{-19,78},{-20,90},{13,64},{19,78},{20,90}}};
             for(auto [a,b]:edges)dl->AddLine(centre+px(joints[a].x,joints[a].y),centre+px(joints[b].x,joints[b].y),color,px(1.5f));
         }
+        if(app.settings.hitboxes) {
+            Player example;
+            for(const auto& model:std::array<ModelHitbox,4>{{{{0,-5,0},{0,3,0},10,-1,1,HitboxShape::Capsule},{{0,29,0},{0,51,0},17,-1,2,HitboxShape::Capsule},{{-24,30,0},{-34,61,0},6,-1,4,HitboxShape::Capsule},{{24,30,0},{34,61,0},6,-1,5,HitboxShape::Capsule}}}) {
+                Hitbox box;if(world_hitbox(model,{0,0,0,1,0,0,0,1},box)){box.visibility_known=box.visible=true;example.hitboxes.push_back(box);}
+            }
+            Matrix projection{1.f/100,0,0,0,0,-1.f/100,0,0,0,0,0,0,0,0,0,1};
+            draw_hitboxes(dl,example,projection,px(200),px(200),app.settings,ui_runtime::scale,centre-px(100,100));
+        }
         if(app.settings.enabled)draw_bar(dl,{centre.x,centre.y-px(22)},health,maximum,health_fraction(health,maximum),app.settings,ui_runtime::scale);
         if(app.settings.head_dot)draw_dot(dl,{centre.x,centre.y},0,ui_runtime::scale);
         if(app.settings.body_dot)draw_dot(dl,{centre.x,centre.y+px(38)},1,ui_runtime::scale);
@@ -743,10 +786,10 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         ImGui::SetCursorScreenPos(preview.Min+px(20,186));
         constexpr auto color_flags=ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel;
         changed|=ImGui::ColorEdit3("##skeleton_visible",&app.settings.skeleton_visible.x,color_flags);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Visible skeleton color");
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Visible skeleton / hitbox color");
         ImGui::SameLine();ImGui::TextUnformatted("Visible");ImGui::SameLine();
         changed|=ImGui::ColorEdit3("##skeleton_hidden",&app.settings.skeleton_hidden.x,color_flags);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Blocked skeleton color");
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Blocked skeleton / hitbox color");
         ImGui::SameLine();ImGui::TextUnformatted("Blocked");
         toggle("head_dot",effects.Min+px(20,44),"Head dot",app.settings.head_dot,right-px(40));
         toggle("body_dot",effects.Min+px(20,80),"Body dot",app.settings.body_dot,right-px(40));
@@ -1027,7 +1070,7 @@ int render_test() {
         if(ok)ok=solace::snapshot::backdrop_ready()&&solace::glass::cursor_live();
         if(ok)ok=capture(app.settings_window,executable_directory()/L"settings-preview.png",true);
         app.settings.head_dot=app.settings.body_dot=app.settings.pelvis_dot=true;
-        app.settings.skeletons=true;
+        app.settings.skeletons=app.settings.hitboxes=true;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
         if(ok)ok=capture(app.settings_window,executable_directory()/L"marker-settings-preview.png",true);
         app.menu_page=solace::shell_page::camera;
@@ -1085,6 +1128,14 @@ int render_test() {
         if(ok)ok=capture(app.bar_window,executable_directory()/L"bar-preview.png",true);
         if(ok){ok=begin_frame(app.bar_window);if(ok){Settings demo;draw_bar(ImGui::GetBackgroundDrawList(),{170,90},740,1000,.74f,demo,1);for(int i=0;i<3;++i)draw_dot(ImGui::GetBackgroundDrawList(),{125,55.f+35.f*i},i,1);render_frame(app.bar_window);ok=capture(app.bar_window,executable_directory()/L"markers-preview.png",true);}}
         SetWindowPos(app.bar_window.hwnd,nullptr,0,0,640,360,SWP_NOACTIVATE|SWP_NOZORDER);
+        Player shapes;
+        for(auto model:std::array<ModelHitbox,3>{{{{-18,-26,-12},{18,26,12},0,-1,2,HitboxShape::Box},{{0,-30,0},{0,30,0},15,-1,3,HitboxShape::Capsule},{{0,0,0},{0,0,0},25,-1,1,HitboxShape::Sphere}}}) {
+            const float x=shapes.hitboxes.empty()?-100.f:shapes.hitboxes.size()==1?0.f:100.f;
+            Hitbox box;if(world_hitbox(model,{x,0,350,1,0,0,.258819f,.965926f},box)){box.visibility_known=true;box.visible=shapes.hitboxes.size()!=1;shapes.hitboxes.push_back(box);}
+        }
+        Matrix shape_projection{.5625f,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};
+        for(int i=0;i<3&&ok;++i){ok=begin_frame(app.bar_window);if(ok){ok=draw_hitboxes(ImGui::GetBackgroundDrawList(),shapes,shape_projection,640,360,Settings{},1)==3;render_frame(app.bar_window);}}
+        if(ok)ok=capture(app.bar_window,executable_directory()/L"hitboxes-preview.png",true);
         Snapshot areas;areas.matrix={.5625f,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};areas.players.resize(2);
         for(int i=0;i<2;++i){auto& target=areas.players[i];target.handle=uint32_t(i+1);target.dot_valid.fill(true);target.dots.fill({i==0?250.f:-650.f,0,i==0?1800.f:3200.f});}
         Settings area_demo;area_demo.show_focus_area.fill(true);area_demo.focus_visuals=false;area_demo.visible_only=false;
@@ -1151,7 +1202,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
     std::jthread reader([&](std::stop_token stop) {
         GameReader game;FramePacer sample_pacer;unsigned revision{};while(!stop.stop_requested()) {
             auto next_revision=app.data_revision.load();if(next_revision!=revision){game.refresh_data();revision=next_revision;}
-            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0});{std::lock_guard lock(app.mutex);app.snapshot=std::move(s);}
+            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0});{std::lock_guard lock(app.mutex);app.snapshot=std::move(s);}
             sample_pacer.wait(app.sampling?app.sample_hz.load():5.0);
         }
     });
@@ -1185,7 +1236,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         if(key&&!insert_down&&focused){if(app.show_settings)app.hide_settings();else app.open_settings();}insert_down=key;
         foreground=GetForegroundWindow();
         focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd);
-        app.read_options.store((app.settings.skeletons?1u:0u)|(app.settings.focus_minions?2u:0u)|(app.settings.focus_orbs?4u:0u));
+        app.read_options.store((app.settings.skeletons?1u:0u)|(app.settings.focus_minions?2u:0u)|(app.settings.focus_orbs?4u:0u)|(app.settings.hitboxes?8u:0u));
         auto focus_speed=hero_focus_speed(snapshot.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed);
         app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms());
         app.sampling=focused;
@@ -1196,9 +1247,9 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         if(focused&&IsWindowVisible(pacing_surface.hwnd)&&!pacing_surface.renderer.wait_for_frame(4))continue;
         auto queue_wait_ms=clock_ms()-queue_wait_start;
         {std::lock_guard lock(app.mutex);snapshot=app.snapshot;}
-        bool visible=focused&&(app.settings.enabled||app.settings.skeletons||app.settings.head_dot||app.settings.body_dot||app.settings.pelvis_dot||show_focus_area(app.settings)||(app.settings.focus_visuals&&(app.settings.free_focus||app.settings.replay_focus)))&&fresh(GetTickCount64(),snapshot.time);
+        bool visible=focused&&(app.settings.enabled||app.settings.skeletons||app.settings.hitboxes||app.settings.head_dot||app.settings.body_dot||app.settings.pelvis_dot||show_focus_area(app.settings)||(app.settings.focus_visuals&&(app.settings.free_focus||app.settings.replay_focus)))&&fresh(GetTickCount64(),snapshot.time);
         if(last_pid!=snapshot.pid){app.displayed.clear();last_pid=snapshot.pid;}
-        app.sampling=focused;app.bars=0;bool rendered=false,bar_raised=false;
+        app.sampling=focused;app.bars=0;int drawn_hitboxes=0;bool rendered=false,bar_raised=false;
         if(visible) {
             RECT r{};POINT origin{};if(!GetClientRect(game,&r)||!ClientToScreen(game,&origin)||r.right<=0||r.bottom<=0)visible=false;
             else {
@@ -1214,6 +1265,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
                 for(const auto& player:snapshot.players) {
                     if(!include_player(app.settings.exclude_teammates,snapshot.local_team,player.team))continue;
                     if(app.settings.skeletons)draw_skeleton(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
+                    if(app.settings.hitboxes)drawn_hitboxes+=draw_hitboxes(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
                     if(app.settings.visible_only&&!player.visible)continue;
                     if(app.settings.focus_visuals&&app.settings.free_focus&&app.settings.focus_players){
                         for(int i=0;i<2;++i){ScreenPoint a,b;
@@ -1271,7 +1323,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         uint64_t now=GetTickCount64();
         if(rendered){auto work=clock_ms()-loop_start;auto present=app.bar_window.present_ms+app.settings_window.present_ms;work_sum+=work;queue_wait_sum+=queue_wait_ms;work_max=std::max(work_max,work);submit_sum+=app.bar_window.submit_ms+app.settings_window.submit_ms;present_sum+=present;present_max=std::max(present_max,present);++timing_frames;}
         if(now-fps_epoch>=1000){app.render_fps=double(rendered_frames)*1000/double(now-fps_epoch);rendered_frames=0;fps_epoch=now;}
-        if(diagnostics&&now-last_report>=1000){report(snapshot,executable_directory()/L"session.json",app.bars,IsWindowVisible(app.bar_window.hwnd)!=FALSE,GetWindowLongPtrW(app.bar_window.hwnd,GWL_EXSTYLE),app.bar_window.hwnd,app.show_settings,app.target_hz,app.render_fps);
+        if(diagnostics&&now-last_report>=1000){report(snapshot,executable_directory()/L"session.json",app.bars,IsWindowVisible(app.bar_window.hwnd)!=FALSE,GetWindowLongPtrW(app.bar_window.hwnd,GWL_EXSTYLE),app.bar_window.hwnd,app.show_settings,app.target_hz,app.render_fps,drawn_hitboxes);
             visibility_report(snapshot,executable_directory()/L"visibility.json",app.settings.visible_only,app.camera.occluded);
             std::ofstream makcu_report(executable_directory()/L"makcu.json");
             makcu_report<<"{\"backend\":\"makcu\",\"connected\":"<<(app.makcu.ready()?"true":"false")
@@ -1333,9 +1385,9 @@ int main(int argc,char** argv) {
             std::ofstream out(overlay::executable_directory()/L"frame-trace-probe.json");out<<"{\"pid\":"<<s.pid<<",\"status\":\""<<overlay::escaped(frames.status())<<"\",\"error\":"<<frames.error()<<",\"events\":"<<frames.count()<<",\"delivery_delay_ms\":"<<frames.delay_ms()<<"}\n";frames.stop();return 0;}
         if(benchmark) {
             overlay::GameReader game;overlay::Snapshot s;
-            for(int i=0;i<8;++i){s=game.sample({extended,extended,extended});if(s.time&&s.controllers)break;Sleep(200);}
+            for(int i=0;i<8;++i){s=game.sample({extended,extended,extended,extended});if(s.time&&s.controllers)break;Sleep(200);}
             double total_us{};uint64_t total_reads{};int samples{};
-            for(int i=0;i<203;++i){s=game.sample({extended,extended,extended});if(i>=3&&s.time&&s.controllers){total_us+=s.sample_us;total_reads+=s.read_calls;++samples;}}
+            for(int i=0;i<203;++i){s=game.sample({extended,extended,extended,extended});if(i>=3&&s.time&&s.controllers){total_us+=s.sample_us;total_reads+=s.read_calls;++samples;}}
             auto timing=overlay::display_timing(overlay::game_window(s.pid));overlay::FramePacer pacer;
             auto start=std::chrono::steady_clock::now();for(int i=0;i<120;++i)pacer.wait(timing.hz);
             double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
@@ -1343,7 +1395,7 @@ int main(int argc,char** argv) {
             out<<"{\"extended_read\":"<<(extended?"true":"false")<<",\"target_hz\":"<<timing.hz<<",\"pacing_hz\":"<<120/seconds<<",\"samples\":"<<samples<<",\"average_sample_us\":"<<(samples?total_us/samples:0)<<",\"average_read_calls\":"<<(samples?double(total_reads)/samples:0)<<"}\n";
             return samples?0:2;
         }
-        if(probe){overlay::GameReader game;overlay::Snapshot s;for(int i=0;i<8;++i){s=game.sample({true,true,true});if(s.time&&s.controllers)break;Sleep(200);}overlay::report(s,overlay::executable_directory()/L"probe.json");overlay::visibility_report(s,overlay::executable_directory()/L"visibility-probe.json",true,false);return s.time&&s.controllers?0:2;}
+        if(probe){overlay::GameReader game;overlay::Snapshot s;for(int i=0;i<8;++i){s=game.sample({true,true,true,true});if(s.time&&s.controllers)break;Sleep(200);}overlay::report(s,overlay::executable_directory()/L"probe.json");overlay::visibility_report(s,overlay::executable_directory()/L"visibility-probe.json",true,false);return s.time&&s.controllers?0:2;}
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(resource_test)return overlay::resource_test();if(render_test)return overlay::render_test();return overlay::run(diagnostics||shutdown_test,settings,shutdown_test,trace_frames);
     } catch(const std::exception& e) {std::ofstream out(overlay::executable_directory()/L"error.log",std::ios::app);out<<e.what()<<'\n';return 1;}
 }

@@ -4,6 +4,8 @@ The 7 October 2026 installation changed client.dll, engine2.dll and worldrendere
 
 The fresh schema contains 34,336 fields. All 20 required fields still match, including health, controllers, scene nodes, collision, the local hero/ability components and Vindicta's scope timer. Later pawn fields changed, but the reader does not use them. Code addresses and private layouts were checked separately against the actual DLL bytes and live read-only process data.
 
+The later [hitbox renderer](HITBOXES.md) adds two required fields: `CSkeletonInstance::m_nHitboxSet` at `0x40C` and `C_BaseModelEntity::m_bvDisabledHitGroups` at `0xB98`. The updater now checks 22 reader fields; both additions match this fresh schema.
+
 | Reader address | Build 6753 RVA | Build 6759 RVA |
 | --- | --- | --- |
 | Entity-system pointer | `0x3BF3BC0` | `0x3C4BA40` |

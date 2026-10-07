@@ -251,7 +251,72 @@ GameReader::Entity GameReader::entity(const std::array<uintptr_t,64>& chunks, ui
     Entity result; std::memcpy(&result.address,identity.data(),8);std::memcpy(&result.handle,identity.data()+0x10,4);
     return result.address && valid_handle(handle,result.handle,index) ? result : Entity{};
 }
-bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton) {
+bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
+    // Build 6759 CModel::GetHitboxSets (0x21BE930): mesh count +0x70,
+    // pointers +0x78, body-group masks +0x90. Each mesh stores 0x48-byte
+    // hitbox-set records; CHitBoxSet begins at record +0x18.
+    std::array<unsigned char,0x28> header{},after{};
+    int mesh_count{};uintptr_t meshes{},masks{};
+    if(!read(model+0x70,header))return false;
+    std::memcpy(&mesh_count,header.data(),4);std::memcpy(&meshes,header.data()+8,8);std::memcpy(&masks,header.data()+0x20,8);
+    if(mesh_count<1||mesh_count>64||!meshes||!masks)return false;
+    std::vector<uintptr_t> mesh_array(mesh_count);std::vector<uint64_t> mesh_masks(mesh_count);
+    if(!read(meshes,mesh_array.data(),mesh_array.size()*8)||!read(masks,mesh_masks.data(),mesh_masks.size()*8))return false;
+    std::vector<BoneInfo::HitboxSet> sets;
+    std::vector<uint32_t> set_hashes;
+    size_t total_boxes=0;
+    for(int mi=0;mi<mesh_count;++mi) {
+        if(!mesh_masks[mi]&&mi!=0)continue;
+        std::array<unsigned char,24> mesh_header{},mesh_after{};
+        int set_count{};uint32_t allocation{};uintptr_t set_array{};
+        if(!mesh_array[mi]||!read(mesh_array[mi]+0x160,mesh_header))return false;
+        std::memcpy(&allocation,mesh_header.data()+4,4);std::memcpy(&set_array,mesh_header.data()+8,8);std::memcpy(&set_count,mesh_header.data()+20,4);
+        allocation&=0x7fffffff;
+        if(set_count<0||set_count>64||allocation<uint32_t(set_count)||allocation>1024||(!set_array&&set_count))return false;
+        std::vector<unsigned char> records(size_t(set_count)*0x48);
+        if(set_count&&!read(set_array,records.data(),records.size()))return false;
+        for(int si=0;si<set_count;++si) {
+            const auto record=records.data()+size_t(si)*0x48;
+            BoneInfo::HitboxSet set;set.mesh_mask=mesh_masks[mi];std::memcpy(&set.hash,record+0x20,4);
+            // CSkeletonInstance resolves m_nHitboxSet against mesh zero's
+            // set names (0x21CE7A0 -> 0x21BE8D0), then filters by name hash.
+            if(mi==0)set_hashes.push_back(set.hash);
+            // The game deduplicates sets by name hash after applying the mesh
+            // mask. Retain the first copy for each mask/hash combination.
+            if(std::any_of(sets.begin(),sets.end(),[&](const auto& cached){return cached.hash==set.hash&&cached.mesh_mask==set.mesh_mask;}))continue;
+            int count{};uint32_t capacity{};uintptr_t boxes{};
+            std::memcpy(&count,record+0x28,4);std::memcpy(&boxes,record+0x30,8);std::memcpy(&capacity,record+0x38,4);capacity&=0x3fffffff;
+            if(count<0||count>128||capacity<uint32_t(count)||capacity>1024||(!boxes&&count)||sets.size()>=256||total_boxes+size_t(count)>2048)return false;
+            std::vector<unsigned char> data(size_t(count)*0x70);
+            if(count&&!read(boxes,data.data(),data.size()))return false;
+            set.boxes.reserve(count);
+            for(int bi=0;bi<count;++bi) {
+                const auto raw=data.data()+size_t(bi)*0x70;ModelHitbox box;uintptr_t bone_name{};
+                std::memcpy(&bone_name,raw+0x10,8);auto name=text(bone_name,100);
+                if(bone_name&&name.empty()){char first{};if(!read(bone_name,first)||first)return false;}
+                if(!name.empty()) {
+                    auto bone=std::find(info.names.begin(),info.names.end(),name);
+                    // Match the model's own bone names, never skeleton-list indices.
+                    // GetHitboxTransforms uses the scene transform if the
+                    // model has no corresponding bone (0x162278A).
+                    if(bone!=info.names.end())box.bone=int(bone-info.names.begin());
+                }
+                std::memcpy(&box.low,raw+0x18,12);std::memcpy(&box.high,raw+0x24,12);
+                std::memcpy(&box.radius,raw+0x30,4);std::memcpy(&box.group,raw+0x38,4);
+                box.shape=static_cast<HitboxShape>(raw[0x3c]);box.translation_only=raw[0x3d]!=0;
+                if(!valid_hitbox(box))return false;
+                set.boxes.push_back(box);
+            }
+            std::array<unsigned char,0x30> set_after{};
+            if(!read(set_array+size_t(si)*0x48+0x18,set_after)||std::memcmp(record+0x18,set_after.data(),set_after.size()))return false;
+            total_boxes+=set.boxes.size();sets.push_back(std::move(set));
+        }
+        if(!read(mesh_array[mi]+0x160,mesh_after)||mesh_after!=mesh_header)return false;
+    }
+    if(!read(model+0x70,after)||after!=header||sets.empty())return false;
+    info.hitbox_sets=std::move(sets);info.hitbox_hashes=std::move(set_hashes);info.hitboxes_loaded=true;return true;
+}
+bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitboxes,uint32_t disabled_groups) {
     std::array<unsigned char,0x28> model_state{};
     if(!read(scene+0x1c0,model_state))return false;
     uintptr_t binding{},transforms{};
@@ -275,21 +340,50 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton) {
         info.dots[0]=head;info.dots[1]=spine>=0?spine:chest;
         std::vector<int16_t> parents(info.count);auto parent_array=pointer(model+0x180);
         if(parent_array&&read(parent_array,parents.data(),parents.size()*sizeof(int16_t)))info.edges=skeleton_edges(bone_names,parents);
+        info.names=std::move(bone_names);
         found=models_.emplace(model,std::move(info)).first;
     }
-    const auto& info=found->second; int16_t count{};
+    auto& info=found->second; int16_t count{};
     if (info.index<0 || !read(scene+0x3e0,count) || count!=info.count || info.index>=count) return false;
+    const BoneInfo::HitboxSet* hitbox_set=nullptr;uint64_t body_mask{};uint8_t set_index{};
+    if(hitboxes) {
+        auto now=GetTickCount64();
+        if(!info.hitboxes_loaded&&now>=info.next_hitbox_load) {info.next_hitbox_load=now+1000;load_hitboxes(model,info);}
+        if(info.hitboxes_loaded&&read(scene+0x348,body_mask)&&read(scene+0x40c,set_index)) {
+            if(set_index<info.hitbox_hashes.size())for(const auto& set:info.hitbox_sets)
+                if((set.mesh_mask&body_mask)&&set.hash==info.hitbox_hashes[set_index]){hitbox_set=&set;break;}
+            player.hitbox_set=set_index;
+            player.hitbox_status=hitbox_set?"Ready":"Active hitbox set unavailable";
+        } else player.hitbox_status="Model hitboxes unavailable";
+    }
     int first=info.index,last=info.index;
     for(auto index:info.dots)if(index>=0&&index<count){first=std::min(first,index);last=std::max(last,index);}
     if(skeleton)for(auto [a,b]:info.edges){first=std::min(first,std::min(a,b));last=std::max(last,std::max(a,b));}
+    if(hitbox_set)for(const auto& box:hitbox_set->boxes)if(box.bone>=0){first=std::min(first,box.bone);last=std::max(last,box.bone);}
     std::array<unsigned char,1024*0x20> positions;
-    if(!read(transforms+first*0x20,positions.data(),size_t(last-first)*0x20+sizeof(Vec3)))return false;
+    if(!read(transforms+first*0x20,positions.data(),size_t(last-first)*0x20+(hitbox_set?0x20:sizeof(Vec3))))return false;
     auto position=[&](int index,Vec3& out){if(index<first||index>last)return false;std::memcpy(&out,positions.data()+(index-first)*0x20,sizeof(out));return finite(out);};
     if(!position(info.index,player.head))return false;
     for(size_t i=0;i<info.dots.size();++i)player.dot_valid[i]=position(info.dots[i],player.dots[i]);
     if(skeleton)for(auto [a,b]:info.edges) {
         SkeletonSegment segment;
         if(position(a,segment.a)&&position(b,segment.b)&&dot(sub(segment.a,segment.b),sub(segment.a,segment.b))<512.f*512.f)player.skeleton.push_back(segment);
+    }
+    if(hitbox_set) {
+        std::array<float,8> root{};bool root_valid=false;
+        if(std::any_of(hitbox_set->boxes.begin(),hitbox_set->boxes.end(),[](const auto& box){return box.bone<0;}))root_valid=read(scene+0x10,root);
+        player.hitboxes.reserve(hitbox_set->boxes.size());
+        for(const auto& box:hitbox_set->boxes) {
+            if(disabled_groups&(1u<<box.group))continue;
+            std::array<float,8> transform{};Hitbox world;
+            if(box.bone<0){if(!root_valid)continue;transform=root;}
+            else std::memcpy(transform.data(),positions.data()+size_t(box.bone-first)*0x20,0x20);
+            if(world_hitbox(box,transform,world))player.hitboxes.push_back(world);
+        }
+        uint64_t mask_after{};uint8_t set_after{};
+        if(!read(scene+0x348,mask_after)||!read(scene+0x40c,set_after)||mask_after!=body_mask||set_after!=set_index) {
+            player.hitboxes.clear();player.hitbox_status="Hitbox set changed during sample";
+        }
     }
     // Do not publish a transform if the model/array changed during the sample.
     std::array<unsigned char,0x28> current_state{};
@@ -556,7 +650,10 @@ Snapshot GameReader::sample(ReadOptions options) {
         std::memcpy(&scene,fields.data(),8);std::memcpy(&p.maximum,fields.data()+0x20,4);std::memcpy(&p.health,fields.data()+0x24,4);
         p.team=fields[0xbf];uint8_t dormant{};
         if (fields[0x2c] || p.health<=0 || p.maximum<=0 || !scene || !read(scene+0x103,dormant) || dormant) continue;
-        if (!anchor(scene,p,options.skeletons)) {++result.missing_anchors;continue;}
+        uint32_t disabled_groups{};
+        bool hitboxes=options.hitboxes&&read(pawn.address+0xb98,disabled_groups);
+        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups)) {++result.missing_anchors;continue;}
+        if(hitboxes){uint32_t after{};if(!read(pawn.address+0xb98,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
         if (entity(chunks,handle).address!=pawn.address) continue;
         if(p.dot_valid[2]&&(velocities_.size()<512||velocities_.contains(handle))){auto& estimate=velocities_[handle];estimate.update(p.dots[2],now);p.velocity=estimate.velocity;p.velocity_valid=estimate.valid;}
         result.players.push_back(std::move(p));
@@ -595,6 +692,9 @@ Snapshot GameReader::sample(ReadOptions options) {
                 segment.visibility_known=true;
                 segment.visible=result.visibility->clear(result.camera_position,segment.a)&&result.visibility->clear(result.camera_position,segment.b)
                     &&result.visibility->clear(result.camera_position,mul(add(segment.a,segment.b),.5f));
+            }
+            for(auto& box:player.hitboxes) {
+                box.visibility_known=true;box.visible=result.visibility->clear(result.camera_position,hitbox_center(box));
             }
         }
         for(auto& target:result.focus_targets)visible(target);

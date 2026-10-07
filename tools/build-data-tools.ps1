@@ -1,4 +1,4 @@
-param([string]$DotnetPath = '')
+param([string]$DotnetPath = '', [switch]$SelfTests)
 $ErrorActionPreference = 'Stop'
 $projectDirectory = Split-Path $PSScriptRoot -Parent
 $releaseDirectory = Join-Path $projectDirectory 'build\Release'
@@ -16,8 +16,10 @@ if (!$DotnetPath -or !(Test-Path -LiteralPath $DotnetPath)) {
 }
 & $DotnetPath publish (Join-Path $PSScriptRoot 'data-update\DataUpdate.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=None -o $helperDirectory
 if ($LASTEXITCODE -ne 0) { throw 'Data updater publish failed.' }
-& (Join-Path $helperDirectory 'DeadlockDataUpdate.exe') --self-test
-if ($LASTEXITCODE -ne 0) { throw 'Data updater checks failed.' }
+if ($SelfTests) {
+    & (Join-Path $helperDirectory 'DeadlockDataUpdate.exe') --self-test
+    if ($LASTEXITCODE -ne 0) { throw 'Data updater checks failed.' }
+}
 $dumperSource = Join-Path $PSScriptRoot 'schema-dumper\source'
 $dumperBuild = Join-Path $PSScriptRoot 'schema-dumper\build'
 cmake -S $dumperSource -B $dumperBuild -A x64

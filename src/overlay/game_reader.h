@@ -4,6 +4,7 @@
 #include "weapon_profile.h"
 #include "hero_profile.h"
 #include "visibility.h"
+#include "hitboxes.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -19,7 +20,7 @@ inline TargetKind extra_target_kind(std::string_view name) {
     if(name==".?AVC_NPC_Trooper@@"||name==".?AVC_NPC_TrooperNeutral@@"||name==".?AVC_NPC_TrooperNeutralNodeMover@@")return TargetKind::Minion;
     return TargetKind::None;
 }
-struct ReadOptions { bool skeletons{},minions{},orbs{}; };
+struct ReadOptions { bool skeletons{},minions{},orbs{},hitboxes{}; };
 struct FocusTarget {
     uint32_t handle{};
     TargetKind kind{TargetKind::Player};
@@ -35,6 +36,9 @@ struct SkeletonSegment { Vec3 a{},b{}; bool visible{},visibility_known{}; };
 struct Player : FocusTarget {
     Vec3 head{};
     std::vector<SkeletonSegment> skeleton;
+    std::vector<Hitbox> hitboxes;
+    int hitbox_set{-1};
+    std::string hitbox_status;
     std::string anchor;
 };
 struct Snapshot {
@@ -80,6 +84,11 @@ private:
     struct BoneInfo {
         int count{}, index{-1}; std::array<int,3> dots{-1,-1,-1};std::string name;
         std::vector<std::pair<int,int>> edges;
+        std::vector<std::string> names;
+        struct HitboxSet {uint64_t mesh_mask{};uint32_t hash{};std::vector<ModelHitbox> boxes;};
+        std::vector<HitboxSet> hitbox_sets;
+        std::vector<uint32_t> hitbox_hashes;
+        bool hitboxes_loaded{};uint64_t next_hitbox_load{};
     };
     std::unordered_map<uintptr_t, std::string> types_;
     std::unordered_map<uintptr_t, BoneInfo> models_;
@@ -112,7 +121,8 @@ private:
     std::string loaded_arena(uint64_t now);
     bool enumerate(uintptr_t system);
     Entity entity(const std::array<uintptr_t,64>& chunks, uint32_t handle) const;
-    bool anchor(uintptr_t scene, Player& player,bool skeleton=false);
+    bool load_hitboxes(uintptr_t model,BoneInfo& info);
+    bool anchor(uintptr_t scene, Player& player,bool skeleton=false,bool hitboxes=false,uint32_t disabled_groups=0);
     bool extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& target);
     WeaponProfile weapon_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn);
     HeroProfile hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn);
