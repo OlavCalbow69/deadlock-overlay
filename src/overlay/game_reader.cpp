@@ -395,9 +395,12 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
 }
 bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& target) {
     if(object.kind==TargetKind::Minion) {
-        Player bones;
-        if(anchor(scene,bones)&&bones.dot_valid[0]&&bones.dot_valid[2]) {
+        Player bones;uint32_t disabled_groups{};
+        bool hitboxes=options_.hitboxes&&read(object.address+0xb98,disabled_groups);
+        if(anchor(scene,bones,false,hitboxes,disabled_groups)&&bones.dot_valid[0]&&bones.dot_valid[2]) {
+            if(hitboxes){uint32_t after{};if(!read(object.address+0xb98,after)||after!=disabled_groups)bones.hitboxes.clear();}
             if(!bones.dot_valid[1]){bones.dots[1]=mul(add(bones.dots[0],bones.dots[2]),.5f);bones.dot_valid[1]=true;}
+            target.hitboxes=std::move(bones.hitboxes);
             target.dots=bones.dots;target.dot_valid=bones.dot_valid;return true;
         }
     }
@@ -419,6 +422,10 @@ bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& 
     // supplies position, scale and quaternion; scale is essential for neutrals.
     if(!scene_point(world_transform,center,world))return false;
     target.dots.fill(world);target.dot_valid.fill(true);
+    if(object.kind==TargetKind::Minion&&options_.hitboxes&&bounds_valid) {
+        ModelHitbox model{bounds[0],bounds[1],0,-1,0,HitboxShape::Box};Hitbox box;
+        if(world_hitbox(model,world_transform,box))target.hitboxes.push_back(box);
+    }
     return true;
 }
 HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
@@ -697,7 +704,10 @@ Snapshot GameReader::sample(ReadOptions options) {
                 box.visibility_known=true;box.visible=result.visibility->clear(result.camera_position,hitbox_center(box));
             }
         }
-        for(auto& target:result.focus_targets)visible(target);
+        for(auto& target:result.focus_targets) {
+            visible(target);
+            for(auto& box:target.hitboxes){box.visibility_known=true;box.visible=result.visibility->clear(result.camera_position,hitbox_center(box));}
+        }
     }
     result.visibility_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-ray_started).count();
     result.time=GetTickCount64();result.read_calls=read_calls_;

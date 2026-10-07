@@ -23,6 +23,8 @@ Free movement is available again through a different control rule: find the scre
 
 The previous raw-Y implementation was disabled because MAKCU V4 lacks the old `km.axis` text stream. Hardware-generated corrections cannot carry a Windows SendInput tag, so that implementation would feed our own corrections back into manual movement. The current geometry rule does not need that stream or the firmware history API. Selected-bone focus remains available by turning Free movement off.
 
+The selector now also offers **V2: Full hitboxes** alongside the original **V1: Bone line** and **Off**. V2 permits movement inside any full animated hitbox and corrects toward the nearest projected boundary outside. It uses the same existing `km.move` backend, without physical-axis telemetry. See [free movement modes](FREE_MOVEMENT.md) for prediction, drawing and target-type behavior.
+
 ## Diagnostics and checks
 
 `DeadlockOverlay.exe --makcu-probe` verifies connection and several heartbeat replies, writes `makcu-probe.json`, and exits without movement commands. Normal `--diagnostics` writes `makcu.json` once per reporting interval. The GUI connection card displays serial status.

@@ -31,12 +31,12 @@ struct FocusTarget {
     std::array<bool,3> dot_valid{};
     std::array<bool,3> dot_visible{};
     bool visible{};
+    std::vector<Hitbox> hitboxes;
 };
 struct SkeletonSegment { Vec3 a{},b{}; bool visible{},visibility_known{}; };
 struct Player : FocusTarget {
     Vec3 head{};
     std::vector<SkeletonSegment> skeleton;
-    std::vector<Hitbox> hitboxes;
     int hitbox_set{-1};
     std::string hitbox_status;
     std::string anchor;

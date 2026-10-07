@@ -2,6 +2,7 @@
 #include "game_reader.h"
 #include "makcu_input.h"
 #include "focus_area.h"
+#include "focus_hitboxes.h"
 #include <random>
 #include <climits>
 
@@ -17,9 +18,17 @@ struct FocusOptions {
 inline bool focus_candidate(const FocusTarget& target,const Snapshot& snapshot,FocusOptions options,bool enemies_only) {
     return options.allows(target.kind)&&(target.kind==TargetKind::SoulOrb||snapshot.replay||include_player(enemies_only,snapshot.local_team,target.team));
 }
-inline bool focus_point(const Matrix& matrix,const FocusTarget& target,int bone,bool free_move,float width,float height,ScreenPoint center,Vec3 lead,Vec3& world,float& line_position) {
+inline bool focus_point(const Matrix& matrix,const FocusTarget& target,int bone,bool free_move,float width,float height,ScreenPoint center,Vec3 lead,Vec3& world,float& line_position,FreeMovementMode mode=FreeMovementMode::BoneLine,int* hitbox_index=nullptr,bool* inside_hitbox=nullptr) {
+    if(hitbox_index)*hitbox_index=-1;if(inside_hitbox)*inside_hitbox=false;
     if(bone<0||bone>2)return false;
     if(free_move&&target.kind!=TargetKind::SoulOrb) {
+        if(mode==FreeMovementMode::Hitboxes) {
+            ClosestHitboxPoint nearest;
+            if(!closest_focus_hitboxes(matrix,target.hitboxes,width,height,center,lead,nearest))return false;
+            world=nearest.world;line_position=float(bone);
+            if(hitbox_index)*hitbox_index=nearest.index;if(inside_hitbox)*inside_hitbox=nearest.inside;
+            return true;
+        }
         if(!target.dot_valid[0]||!target.dot_valid[1]||!target.dot_valid[2])return false;
         auto points=target.dots;for(auto& p:points)p=add(p,lead);
         ClosestLinePoint nearest;
@@ -29,19 +38,21 @@ inline bool focus_point(const Matrix& matrix,const FocusTarget& target,int bone,
     if(!target.dot_valid[bone])return false;
     world=add(target.dots[bone],lead);line_position=float(bone);return finite(world);
 }
-inline bool focus_target_geometry(const Snapshot& snapshot,const FocusTarget& target,int bone,bool free_move,FocusArea area,float width,float height,ScreenPoint center,Vec3& world,float& line,ScreenPoint& screen) {
-    return bone>=0&&bone<3&&target.dot_valid[bone]
-        &&focus_point(snapshot.matrix,target,bone,free_move,width,height,center,{},world,line)
-        &&focus_project(snapshot.matrix,world,width,height,screen)
-        &&focus_area_contains(area,snapshot.matrix,target.dots[bone],screen,width,height,center);
+inline bool focus_target_geometry(const Snapshot& snapshot,const FocusTarget& target,int bone,bool free_move,FocusArea area,float width,float height,ScreenPoint center,Vec3& world,float& line,ScreenPoint& screen,FreeMovementMode mode=FreeMovementMode::BoneLine) {
+    bool inside=false;
+    if(bone<0||bone>=3||!target.dot_valid[bone]
+        ||!focus_point(snapshot.matrix,target,bone,free_move,width,height,center,{},world,line,mode,nullptr,&inside)
+        ||!focus_project(snapshot.matrix,world,width,height,screen))return false;
+    if(inside)screen=center; // All intersected volumes have exactly zero selection distance.
+    return focus_area_contains(area,snapshot.matrix,target.dots[bone],screen,width,height,center);
 }
 inline std::mt19937& focus_random() {static thread_local std::mt19937 rng(std::random_device{}());return rng;}
-inline const FocusTarget* select_focus_target(const Snapshot& snapshot,FocusOptions options,bool enemies_only,int bone,bool free_move,bool visible_only,float width,float height,ScreenPoint center,FocusArea area={},std::mt19937* random=nullptr) {
+inline const FocusTarget* select_focus_target(const Snapshot& snapshot,FocusOptions options,bool enemies_only,int bone,bool free_move,bool visible_only,float width,float height,ScreenPoint center,FocusArea area={},std::mt19937* random=nullptr,FreeMovementMode mode=FreeMovementMode::BoneLine) {
     const FocusTarget* selected=nullptr;double best=std::numeric_limits<double>::max();int lowest=INT_MAX;unsigned ties{};
     auto consider=[&](const FocusTarget& target) {
         if(!focus_candidate(target,snapshot,options,enemies_only))return;
         Vec3 world{};float line{};ScreenPoint screen{};
-        if(!focus_target_geometry(snapshot,target,bone,free_move,area,width,height,center,world,line,screen)
+        if(!focus_target_geometry(snapshot,target,bone,free_move,area,width,height,center,world,line,screen,mode)
             ||!visibility_allowed(visible_only,snapshot.visibility,snapshot.camera_position,snapshot.camera_valid,world))return;
         // Millipixel bins give symmetric targets the same score despite float rounding.
         double distance=std::round(double(std::hypot(screen.x-center.x,screen.y-center.y))*1000.);
@@ -60,14 +71,15 @@ struct ReplayCamera {
     uint32_t target{};bool engaged{},lost{};int bone{-1};double last{};
     float remainder_x{},remainder_y{};
     float line_position{1.f},flight_time{};bool free_mode{},prediction_active{},point_valid{},occluded{};Vec3 aim_point{};
+    FreeMovementMode free_movement_mode{FreeMovementMode::BoneLine};int hitbox_index{-1};bool inside_hitbox{};
     TargetKind kind{TargetKind::None};int target_mask{};
     FocusArea focus_area{};uint64_t attempted_sample{};bool input_blocked{};
     uint64_t moves{},input_failures{};
-    void release(){target=0;kind=TargetKind::None;engaged=lost=input_blocked=false;bone=-1;last=0;attempted_sample=0;remainder_x=remainder_y=0;point_valid=prediction_active=occluded=false;flight_time=0;}
-    const FocusTarget* choose(const Snapshot& snapshot,FocusOptions targets,bool enemies_only,int selected_bone,bool free_move,bool visible_only,FocusArea area,float width,float height,ScreenPoint center,double now,std::mt19937* random=nullptr) {
+    void release(){target=0;kind=TargetKind::None;engaged=lost=input_blocked=false;bone=-1;last=0;attempted_sample=0;remainder_x=remainder_y=0;point_valid=prediction_active=occluded=inside_hitbox=false;hitbox_index=-1;flight_time=0;}
+    const FocusTarget* choose(const Snapshot& snapshot,FocusOptions targets,bool enemies_only,int selected_bone,bool free_move,bool visible_only,FocusArea area,float width,float height,ScreenPoint center,double now,std::mt19937* random=nullptr,FreeMovementMode mode=FreeMovementMode::BoneLine) {
         area=valid_focus_area(area);selected_bone=std::clamp(selected_bone,0,2);
-        if(!engaged||bone!=selected_bone||free_mode!=free_move||target_mask!=targets.mask()||focus_area!=area) {
-            release();engaged=true;bone=selected_bone;free_mode=free_move;line_position=float(bone);target_mask=targets.mask();focus_area=area;last=now;
+        if(!engaged||bone!=selected_bone||free_mode!=free_move||free_movement_mode!=mode||target_mask!=targets.mask()||focus_area!=area) {
+            release();engaged=true;bone=selected_bone;free_mode=free_move;free_movement_mode=mode;line_position=float(bone);target_mask=targets.mask();focus_area=area;last=now;
         }
         if(input_blocked)return nullptr;
         const FocusTarget* selected=nullptr;
@@ -75,13 +87,13 @@ struct ReplayCamera {
             for(const auto& player:snapshot.players)if(player.handle==target){selected=&player;break;}
             if(!selected)for(const auto& object:snapshot.focus_targets)if(object.handle==target){selected=&object;break;}
             Vec3 world{};float line{};ScreenPoint screen{};
-            if(!selected||!focus_candidate(*selected,snapshot,targets,enemies_only)||!focus_target_geometry(snapshot,*selected,bone,free_move,area,width,height,center,world,line,screen)) {
-                selected=nullptr;target=0;kind=TargetKind::None;point_valid=prediction_active=occluded=false;flight_time=0;remainder_x=remainder_y=0;last=now;
+            if(!selected||!focus_candidate(*selected,snapshot,targets,enemies_only)||!focus_target_geometry(snapshot,*selected,bone,free_move,area,width,height,center,world,line,screen,mode)) {
+                selected=nullptr;target=0;kind=TargetKind::None;point_valid=prediction_active=occluded=inside_hitbox=false;hitbox_index=-1;flight_time=0;remainder_x=remainder_y=0;last=now;
             }
         }
         if(!target&&attempted_sample!=snapshot.time) {
             attempted_sample=snapshot.time;
-            selected=select_focus_target(snapshot,targets,enemies_only,bone,free_move,visible_only,width,height,center,area,random);
+            selected=select_focus_target(snapshot,targets,enemies_only,bone,free_move,visible_only,width,height,center,area,random,mode);
             if(selected){target=selected->handle;kind=selected->kind;last=now;remainder_x=remainder_y=0;}
         }
         lost=!selected;
@@ -98,7 +110,7 @@ struct ReplayCamera {
         desired=std::clamp(desired,-limit,limit);
         auto count=static_cast<LONG>(desired);remainder=desired-float(count);return count;
     }
-    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,FocusArea area_config,double now) {
+    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,FocusArea area_config,double now,FreeMovementMode mode=FreeMovementMode::BoneLine) {
         input.cancel(); // No previous correction survives a changed gate/occlusion state.
         if(!input.ready()){release();return;}
         bool held=(GetAsyncKeyState(VK_XBUTTON1)&0x8000)||(GetAsyncKeyState(VK_XBUTTON2)&0x8000);
@@ -106,10 +118,11 @@ struct ReplayCamera {
         if(!camera_allowed(enabled,camera_mode_allowed(snapshot.replay,snapshot.practice,debug_enabled),foreground,menu,held,GetTickCount64(),snapshot.time)){release();return;}
         RECT area{};if(!GetClientRect(game,&area)||area.right<=0||area.bottom<=0){release();return;}
         selected_bone=std::clamp(selected_bone,0,2);ScreenPoint center{area.right*.5f,area.bottom*.5f},point{};
-        const auto* selected=choose(snapshot,targets,enemies_only,selected_bone,free_move,visible_only,area_config,float(area.right),float(area.bottom),center,now);
+        const auto* selected=choose(snapshot,targets,enemies_only,selected_bone,free_move,visible_only,area_config,float(area.right),float(area.bottom),center,now,nullptr,mode);
         if(!selected)return;
-        if(!focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,{},aim_point,line_position))return;
-        prediction_active=false;flight_time=0;Vec3 source{};
+        point_valid=false;
+        if(!focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,{},aim_point,line_position,mode,&hitbox_index,&inside_hitbox)){last=now;remainder_x=remainder_y=0;return;}
+        prediction_active=false;flight_time=0;Vec3 source{},lead{};
         occluded=!visibility_allowed(visible_only,snapshot.visibility,snapshot.camera_position,snapshot.camera_valid,aim_point);
         if(occluded){point_valid=false;last=now;remainder_x=remainder_y=0;return;}
         float inheritance=auto_speed?snapshot.weapon.inheritance:(inherit_velocity?1.f:0.f);
@@ -118,19 +131,22 @@ struct ReplayCamera {
             Vec3 relative=sub(selected->velocity,mul(snapshot.local_velocity,inheritance));
             if(intercept(source,aim_point,relative,projectile_speed,flight_time)){
                 Vec3 predicted{};float position=line_position;
-                if(focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,mul(relative,flight_time),predicted,position)) {
-                    aim_point=predicted;line_position=position;prediction_active=true;
+                Vec3 predicted_lead=mul(relative,flight_time);int predicted_hitbox=-1;bool predicted_inside=false;
+                if(focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,predicted_lead,predicted,position,mode,&predicted_hitbox,&predicted_inside)) {
+                    aim_point=predicted;line_position=position;prediction_active=true;lead=predicted_lead;hitbox_index=predicted_hitbox;inside_hitbox=predicted_inside;
                 }
             }
         }
-        // With prediction, the closest point may be on another part of the line.
-        auto actual_point=free_move&&selected->kind!=TargetKind::SoulOrb?focus_line(selected->dots,line_position):selected->dots[bone];
+        // Check the corresponding current point as well as the predicted point,
+        // including when prediction chooses a different limb or hitbox.
+        auto actual_point=sub(aim_point,lead);
         occluded=!visibility_allowed(visible_only,snapshot.visibility,snapshot.camera_position,snapshot.camera_valid,actual_point);
         if(occluded){point_valid=false;last=now;remainder_x=remainder_y=0;return;}
         occluded=!visibility_allowed(visible_only,snapshot.visibility,snapshot.camera_position,snapshot.camera_valid,aim_point);
         if(occluded){point_valid=false;last=now;remainder_x=remainder_y=0;return;}
         point_valid=focus_project(snapshot.matrix,aim_point,float(area.right),float(area.bottom),point);
         if(!point_valid){last=now;remainder_x=remainder_y=0;return;}
+        if(free_move&&mode==FreeMovementMode::Hitboxes&&inside_hitbox){last=now;remainder_x=remainder_y=0;return;}
         float dt=float((now-last)/1000.);last=now;
         auto dx=motion(point.x-center.x,dt,remainder_x,speed),dy=motion(point.y-center.y,dt,remainder_y,speed);
         if(!(dx||dy))return;
