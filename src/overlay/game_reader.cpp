@@ -10,9 +10,9 @@
 
 namespace overlay {
 namespace {
-// Build 6753 client: field layouts checked against the fresh 6 October dump,
+// Build 6759 client: field layouts checked against the fresh 7 October dump,
 // globals checked against unique signatures and RIP-relative references.
-constexpr char supported[] = "678aec94adb44623e335ee7ec76c08f4477a0ea88a85cea5cb70abace1bacaa8";
+constexpr char supported[] = "b48636d0282a3f6916725e1701c0454738bb5a4903e83fc96a27b01dce800d23";
 std::string sha256(const std::vector<unsigned char>& bytes) {
     BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{};
     if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0)<0) return {};
@@ -121,10 +121,10 @@ bool GameReader::attach() {
     if (sha256(file)!=supported) {status_="Unsupported client.dll: update required";next_attach_=now+10000;return false;}
     std::ifstream engine_input(std::filesystem::path(engine_path),std::ios::binary);
     std::vector<unsigned char> engine_file{std::istreambuf_iterator<char>(engine_input),{}};
-    if(sha256(engine_file)!="aac84e48de57844d5499af8fd95c976143efe2f14845ff2409b111eb9ff5ce74")engine_base_=0;
+    if(sha256(engine_file)!="084c45473667c65174a9a19c428359ac335c3e990008dbf26c0eef91be44784c")engine_base_=0;
     std::ifstream world_input(std::filesystem::path(world_path),std::ios::binary);
     std::vector<unsigned char> world_file{std::istreambuf_iterator<char>(world_input),{}};
-    if(sha256(world_file)!="2e8dd9057d381c0d097e6fe12e822796cfff4672c1b1eda6b25cd277dd756d5e")world_renderer_base_=0;
+    if(sha256(world_file)!="bae38ed919214dcd74d49f9f01419f7ab2c86a57af666b4308f51241e9ff9888")world_renderer_base_=0;
     process_=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|SYNCHRONIZE,FALSE,target);
     if (!process_) {status_="Read access denied; try Run as administrator";return false;}
     pid_=target;
@@ -143,17 +143,17 @@ bool GameReader::attach() {
             matrix_address_=base_+transform+i+7+displacement; ++matches;
         }
     }
-    if (matches!=1 || entity_slot_-base_!=0x3bf3bc0 || matrix_address_-base_!=0x3c28c60) {
+    if (matches!=1 || entity_slot_-base_!=0x3c4ba40 || matrix_address_-base_!=0x3c80ae0) {
         status_="Resolved addresses differ from validated profile";detach();return false;
     }
     // ScreenTransform uses the legacy CViewSetup aspect override. The actual
     // renderer uses CViewRender's compact view at +0x10, whose final world-to-clip
     // matrix is +0x288. Its native horizontal FOV already includes zoom/overrides.
-    // CViewRender ctor client+0x092B90, matrix product client+0x2165A60.
-    if(pointer(base_+0x3644d60)!=base_+0x2655aa0) {
+    // CViewRender initializer client+0x092810, matrix product client+0x2195400.
+    if(pointer(base_+0x3689a70)!=base_+0x26896b8) {
         status_="Cannot validate final render view";detach();return false;
     }
-    matrix_address_=base_+0x3644d60+0x298;
+    matrix_address_=base_+0x3689a70+0x298;
     // Hero IDs and names come from the current game's hero table and localization,
     // rather than a list that becomes stale when heroes are added or renamed.
     auto game_directory=std::filesystem::path(path).parent_path().parent_path().parent_path();
@@ -168,7 +168,7 @@ bool GameReader::attach() {
     status_="Connected to validated client.dll"; return true;
 }
 bool GameReader::read_projection(Snapshot& result) const {
-    const auto view=base_+0x3644d60;
+    const auto view=base_+0x3689a70;
     for(int attempt=0;attempt<3;++attempt) {
         uint8_t updating{},after{};std::array<float,8> camera{};
         if(!read(view+0x1330,updating)||updating)continue;
@@ -330,7 +330,7 @@ bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& 
 HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
     HeroProfile result;
     if(type(pawn.address)!=".?AVC_CitadelPlayerPawn@@")return result;
-    // CCitadelHeroComponent::GetHeroData, client+0x766430: spawned, loading,
+    // CCitadelHeroComponent::GetHeroData, client+0x767600: spawned, loading,
     // then no-spawn ID. CitadelHeroSpawnData_t has a vtable before its ID.
     std::array<unsigned char,0x40> component{},again{};
     if(!read(pawn.address+0x1620,component))return result;
@@ -339,7 +339,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
         if(id){result.id=id;break;}
     }
     std::array<uintptr_t,2> table{}; // count/padding and data; cache capacity follows.
-    if(result.id<=0||!read(base_+0x36a91f8,table))return result;
+    if(result.id<=0||!read(base_+0x36eded8,table))return result;
     auto count=uint32_t(table[0]);auto array=table[1];
     if(count>1024||uint32_t(result.id)>=count||!array)return result;
     auto record=pointer(array+size_t(result.id)*8);int record_id{};
@@ -379,7 +379,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
                     if(sniper.address&&type(sniper.address)==".?AVCCitadel_Ability_Hornet_Snipe@@") {
                         result.sniper_present=true;result.sniper_handle=sniper_handle_;
                         // The actual game tests != 0 here and clears it on unscope:
-                        // scope client+0xF80670, unscope client+0xF9C8D0.
+                        // scope client+0xFB5DB0, unscope client+0xFD1FF0.
                         float after{};
                         if(read(sniper.address+0x1fe4,result.scope_start)&&std::isfinite(result.scope_start)&&result.scope_start>=0
                             &&read(sniper.address+0x1fe4,after)&&after==result.scope_start
@@ -393,7 +393,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
         }
     }else {ability_pawn_=0;sniper_handle_=UINT32_MAX;ability_handles_.clear();}
     std::array<uintptr_t,2> table_after{};
-    if(!read(pawn.address+0x1620,again)||again!=component||!read(base_+0x36a91f8,table_after)||table_after!=table
+    if(!read(pawn.address+0x1620,again)||again!=component||!read(base_+0x36eded8,table_after)||table_after!=table
         ||pointer(array+size_t(result.id)*8)!=record||entity(chunks,pawn.handle).address!=pawn.address)return {};
     return result;
 }
@@ -423,7 +423,7 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     uint32_t capacity{};uintptr_t array{};int root{};
     std::memcpy(&capacity,weapon_map.data()+12,4);capacity&=0x7fffffff;
     std::memcpy(&array,weapon_map.data()+16,8);std::memcpy(&root,weapon_map.data()+24,4);
-    auto primary=pointer(base_+0x34434a8);uintptr_t info{};
+    auto primary=pointer(base_+0x34883a8);uintptr_t info{};
     if(!primary||!array||capacity>128)return result;
     for(uint32_t steps=0;steps<capacity&&root>=0&&uint32_t(root)<capacity;++steps){
         std::array<unsigned char,24> node{};auto address=array+0x8e8*size_t(root);
@@ -434,25 +434,29 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     if(!info)return result;
     std::array<unsigned char,32> values{};if(!read(info+0xd8,values))return result;
     std::memcpy(&result.base_speed,values.data(),4);std::memcpy(&result.random_factor,values.data()+4,4);std::memcpy(&result.inheritance,values.data()+28,4);
+    // Build 6759 EModifierValue: bonus bullet speed=171, base override=172.
+    // Aggregate reader client+0x129EF30 uses +0x210 version, +0x214 dirty
+    // words and 0x30-byte mirrors beginning at +0x400.
+    constexpr uint32_t speed_index=171,version_offset=0x210,dirty_offset=0x214,cache_offset=0x400;
     auto prop=pointer(pawn.address+0x348);uint32_t version_before{},version_after{};
     std::array<uint8_t,2> groups{};
-    if(!prop||!read(prop+512,version_before)||!read(prop+160+170,groups))return result;
+    if(!prop||!read(prop+version_offset,version_before)||!read(prop+160+speed_index,groups))return result;
     if(groups[1]!=255){result.status="Weapon speed override active";return result;}
     if(groups[0]!=255){
         result.status="Waiting for fresh bullet-speed modifier";
         uint8_t policy{},fallback{};uint16_t dirty{};
         // The engine writes this mirror even when its cache-read optimization is disabled.
-        if(!read(base_+0x3b96240+170,policy)||!read(base_+0x3b9633c,fallback)||!read(prop+516+2*170,dirty))return result;
+        if(!read(base_+0x3bee0c0+speed_index,policy)||!read(base_+0x3bee1bc,fallback)||!read(prop+dirty_offset+2*speed_index,dirty))return result;
         if(!policy)policy=fallback;
         std::array<uint32_t,12> cache{},again{};
-        if(!read(prop+1008+48*170,cache))return result;
+        if(!read(prop+cache_offset+48*speed_index,cache))return result;
         float bonus{};std::memcpy(&bonus,&cache[8],4);uint32_t tick{};
-        if(policy==4){auto globals=pointer(base_+0x327d618);if(!globals||!read(globals+68,tick))return result;}
-        if(!read(prop+512,version_after)||!read(prop+1008+48*170,again)||cache!=again
+        if(policy==4){auto globals=pointer(base_+0x32c0670);if(!globals||!read(globals+68,tick))return result;}
+        if(!read(prop+version_offset,version_after)||!read(prop+cache_offset+48*speed_index,again)||cache!=again
             ||!valid_modifier_cache(cache[0],cache[2],version_before,version_after,policy,cache[3],tick,dirty,cache[4],bonus,cache[1]))return result;
         result.bonus_percent=cache[4]?bonus:0;
     }
-    if(!read(prop+512,version_after)||version_before!=version_after||pointer(pawn.address+0x348)!=prop
+    if(!read(prop+version_offset,version_after)||version_before!=version_after||pointer(pawn.address+0x348)!=prop
         ||pointer(ability.address+0x390)!=vdata||pointer(vdata+384)!=array||entity(chunks,handle).address!=ability.address
         ||entity(chunks,pawn.handle).address!=pawn.address)return result;
     std::array<unsigned char,72> map_after{};if(!read(component+24,map_after)||map_after!=map)return result;
@@ -471,12 +475,12 @@ Snapshot GameReader::sample(ReadOptions options) {
     if (process_ && WaitForSingleObject(process_,0)!=WAIT_TIMEOUT) {detach();status_="Waiting for Deadlock";next_attach_=0;}
     if (!process_ && !attach()) {result.status=status_;return result;}
     result.pid=pid_;result.status=status_;
-    auto rules=pointer(base_+0x3c23060);std::array<int,2> modes{};
-    if(rules&&pointer(rules)==base_+0x268cd28&&read(rules+0xa8,modes)&&pointer(base_+0x3c23060)==rules) {
+    auto rules=pointer(base_+0x3c7aee0);std::array<int,2> modes{};
+    if(rules&&pointer(rules)==base_+0x26be898&&read(rules+0xa8,modes)&&pointer(base_+0x3c7aee0)==rules) {
         result.match_mode=modes[0];result.game_mode=modes[1];
         // Verified mode enum: game 3=Sandbox; match 3=CoopBot.
         result.practice=(modes[1]==3||modes[0]==3);
-        auto testing=pointer(base_+0x3689250);uint8_t hero_testing{};
+        auto testing=pointer(base_+0x36cddc0);uint8_t hero_testing{};
         // The game's sandbox predicate also accepts its server testing convar.
         if((modes[0]==0||modes[0]==2)&&testing&&read(testing+88,hero_testing)&&hero_testing==1)result.practice=true;
     }

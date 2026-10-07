@@ -41,7 +41,7 @@ Visible only defaults on. Static map collision segments determine which players/
 
 Live matches can report `start` as their bootstrap level. Visibility resolves the actual loaded arena through `worldrenderer.dll` before selecting its collision mesh.
 
-Settings persist in `%LOCALAPPDATA%/DeadlockOverlay/settings.ini`. The external reader supports build **6753**, client.dll SHA256 `678aec94adb44623e335ee7ec76c08f4477a0ea88a85cea5cb70abace1bacaa8`, and uses ReadProcessMemory. Use windowed/borderless mode. See the [6753 profile update](docs/BUILD_6753.md).
+Settings persist in `%LOCALAPPDATA%/DeadlockOverlay/settings.ini`. The external reader supports build **6759**, client.dll SHA256 `b48636d0282a3f6916725e1701c0454738bb5a4903e83fc96a27b01dce800d23`, and uses ReadProcessMemory. Use windowed/borderless mode. See the [6759 profile update](docs/BUILD_6759.md).
 
 The reader uses validated binary profiles. A new game patch may require a source update even after maps and schema have been refreshed.
 
