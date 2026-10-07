@@ -158,9 +158,14 @@ void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool
         <<",\"practice\":"<<(s.practice?"true":"false")<<",\"match_mode\":"<<s.match_mode<<",\"game_mode\":"<<s.game_mode<<",\"replay\":"<<(s.replay?"true":"false")<<",\"target_hz\":"<<target_hz<<",\"render_fps\":"<<render_fps<<",\"sample_us\":"<<s.sample_us<<",\"sample_reads\":"<<s.read_calls
         <<",\"hero\":{\"valid\":"<<(s.hero.valid?"true":"false")<<",\"id\":"<<s.hero.id<<",\"name\":\""<<escaped(s.hero.name)<<"\",\"token\":\""<<escaped(s.hero.token)<<"\",\"sniper_present\":"<<(s.hero.sniper_present?"true":"false")<<",\"sniper_valid\":"<<(s.hero.sniper_valid?"true":"false")<<",\"sniper_scoped\":"<<(s.hero.sniper_scoped?"true":"false")<<",\"scope_start\":"<<s.hero.scope_start<<",\"ability_status\":\""<<escaped(s.hero.ability_status)<<"\"}"
         <<",\"projection\":{\"source\":\"final_render_view\",\"valid\":"<<(s.projection.valid?"true":"false")<<",\"horizontal_fov\":"<<s.projection.horizontal_fov<<",\"vertical_fov\":"<<s.projection.vertical_fov<<",\"aspect\":"<<s.projection.aspect<<"}"
-        <<",\"overlay_rect\":["<<bounds.left<<','<<bounds.top<<','<<bounds.right<<','<<bounds.bottom<<"],\"players\":[";
-    bool first=true;for(const auto& p:s.players) {if(!first)out<<',';first=false;
-        out<<"{\"handle\":"<<p.handle<<",\"team\":"<<unsigned(p.team)<<",\"health\":"<<p.health<<",\"maximum\":"<<p.maximum<<",\"anchor\":\""<<p.anchor
+        <<",\"overlay_rect\":["<<bounds.left<<','<<bounds.top<<','<<bounds.right<<','<<bounds.bottom<<"],\"skipped_players\":[";
+    bool first=true;for(const auto& skip:s.skipped_players) {if(!first)out<<',';first=false;
+        out<<"{\"controller\":"<<skip.controller<<",\"pawn\":"<<skip.pawn<<",\"reason\":\""<<escaped(skip.reason)<<"\",\"model\":\""<<escaped(skip.model)<<"\"}";
+    }
+    out<<"],\"players\":[";
+    first=true;for(const auto& p:s.players) {if(!first)out<<',';first=false;
+        out<<"{\"handle\":"<<p.handle<<",\"team\":"<<unsigned(p.team)<<",\"health\":"<<p.health<<",\"maximum\":"<<p.maximum<<",\"anchor\":\""<<escaped(p.anchor)
+            <<"\",\"model\":\""<<escaped(p.model_name)<<"\",\"bone_rig\":\""<<escaped(p.bone_rig)<<"\",\"anchor_status\":\""<<escaped(p.anchor_status)
             <<"\",\"world\":["<<p.head.x<<','<<p.head.y<<','<<p.head.z<<"],\"dots\":[";
         for(size_t i=0;i<3;++i){if(i)out<<',';if(p.dot_valid[i])out<<'['<<p.dots[i].x<<','<<p.dots[i].y<<','<<p.dots[i].z<<']';else out<<"null";}
         size_t visible_segments=0,unknown_segments=0;for(const auto& segment:p.skeleton){if(segment.visible)++visible_segments;if(!segment.visibility_known)++unknown_segments;}

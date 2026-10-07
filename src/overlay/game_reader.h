@@ -40,7 +40,9 @@ struct Player : FocusTarget {
     int hitbox_set{-1};
     std::string hitbox_status;
     std::string anchor;
+    std::string model_name,bone_rig,anchor_status;
 };
+struct PlayerReadSkip {uint32_t controller{},pawn{};std::string reason,model;};
 struct Snapshot {
     DWORD pid{};
     uint64_t time{};
@@ -59,6 +61,7 @@ struct Snapshot {
     std::string visibility_status{"Waiting for map"};
     double visibility_us{};
     std::vector<Player> players;
+    std::vector<PlayerReadSkip> skipped_players;
     std::vector<FocusTarget> focus_targets;
     int controllers{}, invalid_handles{}, missing_anchors{};
     double sample_us{};
@@ -83,6 +86,7 @@ private:
     struct Entity { uintptr_t address{}; uint32_t handle{}; TargetKind kind{TargetKind::None}; };
     struct BoneInfo {
         int count{}, index{-1}; std::array<int,3> dots{-1,-1,-1};std::string name;
+        std::string model_name,rig,error;
         std::vector<std::pair<int,int>> edges;
         std::vector<std::string> names;
         struct HitboxSet {uint64_t mesh_mask{};uint32_t hash{};std::vector<ModelHitbox> boxes;};

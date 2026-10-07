@@ -19,3 +19,7 @@ The reader uses the renderer's completed world-to-clip matrix directly: build 67
 The Connection tab and Hero / abilities popup show the live render FOV and aspect. These are different from the camera-focus acquisition area's **Show FOV** control.
 
 Skeletons omit all head/head-end and neck segments. Both shoulders connect to the highest joint of the remaining drawn spine, even when their original parent was the neck or a lower spine joint. The chest-to-pelvis spine, arms and legs remain. The menu preview uses the same connections as the live skeleton.
+
+Bone anchors use a single model rig. Ordinary models keep their unprefixed names. If those head bones are absent, the reader accepts a unique prefixed rig with connected head, torso and pelvis joints. Baba's model uses `baba_head`, `baba_head_end`, `baba_spine_2` and `baba_pelvis`; its unprefixed pelvis belongs to a separate mount rig. Skeleton drawing normalizes only the selected rig's names, while hitbox binding retains the original names. The rig is resolved once per cached model, without hardcoded bone indices or hero IDs.
+
+Failed name or parent-table reads are retried rather than cached as incomplete metadata. `--probe` and `--diagnostics` report each player's model, rig prefix and anchor, plus `skipped_players` with explicit exclusion reasons. The Connection player count represents successfully read, alive remote players; it excludes the local player and can decrease when players die, become dormant or have no current pawn.

@@ -47,7 +47,7 @@ The reader uses validated binary profiles. A new game patch may require a source
 
 ## Verification
 
-`build.ps1` builds Release, copies map files beside the executable and runs renderer, console-shutdown and GUI resource checks. Logic and data-updater self-tests are opt-in with `-SelfTests`. `--makcu-probe` checks the serial connection without movement. `--probe` captures skeleton, hitbox and additional target data without steering. `--benchmark --extended-read` measures all these reads enabled. Normal `--diagnostics` writes runtime reports, including target kind in `camera.json` and hitbox shapes, active sets, drawing counts and additional targets in `session.json`.
+`build.ps1` builds Release, copies map files beside the executable and runs renderer, console-shutdown and GUI resource checks. Logic and data-updater self-tests are opt-in with `-SelfTests`. `--makcu-probe` checks the serial connection without movement. `--probe` captures skeleton, hitbox and additional target data without steering. `--benchmark --extended-read` measures all these reads enabled. Normal `--diagnostics` writes runtime reports, including target kind in `camera.json` and hitbox shapes, active sets, drawing counts and additional targets in `session.json`. Player reports also include model/rig names and explicit `skipped_players` reasons to diagnose missing players.
 
 The packaged data updater also has `--self-test` checks for map fingerprints, interrupted publication recovery, incomplete dumps and binary/layout compatibility gates. Rebuild it with `build.ps1 -RebuildDataTools -DotnetPath <dotnet.exe>` after modifying the tools. Fresh dumps do not bypass the reader's supported-binary checks; a patch that changes code addresses can still need a profile update.
 

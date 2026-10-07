@@ -1,4 +1,5 @@
 #include "game_reader.h"
+#include "bone_rig.h"
 #include <tlhelp32.h>
 #include <bcrypt.h>
 #include <filesystem>
@@ -93,7 +94,9 @@ std::string GameReader::type(uintptr_t object) {
     auto locator=pointer(vtable-8); std::array<uint32_t,6> col{}; std::string name;
     if (read(locator,col) && col[0]==1 && col[5]<locator) name=text(locator-col[5]+col[3]+16,180);
     if(types_.size()>=4096)types_.clear();
-    types_[vtable]=name; return name;
+    // Retry transient RTTI read failures instead of hiding this class until detach.
+    if(!name.empty())types_[vtable]=name;
+    return name;
 }
 bool GameReader::attach() {
     const auto now=GetTickCount64(); if (now<next_attach_) return false;
@@ -317,34 +320,44 @@ bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
     info.hitbox_sets=std::move(sets);info.hitbox_hashes=std::move(set_hashes);info.hitboxes_loaded=true;return true;
 }
 bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitboxes,uint32_t disabled_groups) {
+    auto fail=[&](const char* reason){player.anchor_status=reason;return false;};
     std::array<unsigned char,0x28> model_state{};
-    if(!read(scene+0x1c0,model_state))return false;
+    if(!read(scene+0x1c0,model_state))return fail("Cannot read model state");
     uintptr_t binding{},transforms{};
     std::memcpy(&transforms,model_state.data(),8);std::memcpy(&binding,model_state.data()+0x20,8);
     auto model=pointer(binding);
-    if (!model || !transforms) return false;
+    if (!model || !transforms) return fail("Model or transforms unavailable");
     auto found=models_.find(model);
     if (found==models_.end()) {
         if(models_.size()>=256)models_.clear();
-        BoneInfo info; if (!read(model+0x178,info.count) || info.count<1 || info.count>1024) return false;
-        auto names=pointer(model+0x168); if (!names) return false;
-        int end=-1, head=-1,spine=-1,chest=-1;
+        BoneInfo info; if (!read(model+0x178,info.count) || info.count<1 || info.count>1024) return fail("Invalid model bone count");
+        auto names=pointer(model+0x168); if (!names) return fail("Bone names unavailable");
         std::vector<uintptr_t> pointers(info.count);
         std::vector<std::string> bone_names(info.count);
-        if (!read(names,pointers.data(),pointers.size()*8)) return false;
+        if (!read(names,pointers.data(),pointers.size()*8)) return fail("Cannot read bone name table");
         for (int i=0;i<info.count;++i) {
-            const auto n=text(pointers[i]);bone_names[i]=n; if (n=="head_end") end=i; else if (n=="head") head=i;
-            else if(n=="spine_2")spine=i;else if(n=="chest")chest=i;else if(n=="pelvis")info.dots[2]=i;
+            bone_names[i]=text(pointers[i]);
+            if(bone_names[i].empty()) {
+                char first{};
+                if(!read(pointers[i],first)||first)return fail("Incomplete bone names; retrying");
+            }
         }
-        info.index=select_anchor(end,head);info.name=end>=0?"head_end":"head";
-        info.dots[0]=head;info.dots[1]=spine>=0?spine:chest;
         std::vector<int16_t> parents(info.count);auto parent_array=pointer(model+0x180);
-        if(parent_array&&read(parent_array,parents.data(),parents.size()*sizeof(int16_t)))info.edges=skeleton_edges(bone_names,parents);
+        if(!parent_array||!read(parent_array,parents.data(),parents.size()*sizeof(int16_t)))return fail("Bone parents unavailable; retrying");
+        auto rig=resolve_bone_rig(bone_names,parents);
+        info.index=rig.anchor();info.dots={rig.head,rig.body,rig.pelvis};info.rig=rig.prefix;
+        if(info.index>=0)info.name=bone_names[info.index];
+        else info.error=rig.ambiguous?"Ambiguous player skeleton rig":"No supported head bone";
+        info.edges=skeleton_edges(rig_skeleton_names(bone_names,rig),parents);
+        info.model_name=text(pointer(model+8),160);
+        // Hitbox definitions must still bind against the original bone names.
         info.names=std::move(bone_names);
         found=models_.emplace(model,std::move(info)).first;
     }
     auto& info=found->second; int16_t count{};
-    if (info.index<0 || !read(scene+0x3e0,count) || count!=info.count || info.index>=count) return false;
+    player.model_name=info.model_name;player.bone_rig=info.rig;
+    if(info.index<0)return fail(info.error.c_str());
+    if(!read(scene+0x3e0,count)||count!=info.count||info.index>=count)return fail("Model and live bone counts differ");
     const BoneInfo::HitboxSet* hitbox_set=nullptr;uint64_t body_mask{};uint8_t set_index{};
     if(hitboxes) {
         auto now=GetTickCount64();
@@ -361,9 +374,9 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     if(skeleton)for(auto [a,b]:info.edges){first=std::min(first,std::min(a,b));last=std::max(last,std::max(a,b));}
     if(hitbox_set)for(const auto& box:hitbox_set->boxes)if(box.bone>=0){first=std::min(first,box.bone);last=std::max(last,box.bone);}
     std::array<unsigned char,1024*0x20> positions;
-    if(!read(transforms+first*0x20,positions.data(),size_t(last-first)*0x20+(hitbox_set?0x20:sizeof(Vec3))))return false;
+    if(!read(transforms+first*0x20,positions.data(),size_t(last-first)*0x20+(hitbox_set?0x20:sizeof(Vec3))))return fail("Cannot read bone transforms");
     auto position=[&](int index,Vec3& out){if(index<first||index>last)return false;std::memcpy(&out,positions.data()+(index-first)*0x20,sizeof(out));return finite(out);};
-    if(!position(info.index,player.head))return false;
+    if(!position(info.index,player.head))return fail("Invalid head transform");
     for(size_t i=0;i<info.dots.size();++i)player.dot_valid[i]=position(info.dots[i],player.dots[i]);
     if(skeleton)for(auto [a,b]:info.edges) {
         SkeletonSegment segment;
@@ -387,11 +400,11 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     }
     // Do not publish a transform if the model/array changed during the sample.
     std::array<unsigned char,0x28> current_state{};
-    if(!read(scene+0x1c0,current_state))return false;
+    if(!read(scene+0x1c0,current_state))return fail("Cannot recheck model state");
     uintptr_t current_binding{},current_transforms{};
     std::memcpy(&current_transforms,current_state.data(),8);std::memcpy(&current_binding,current_state.data()+0x20,8);
-    if(current_binding!=binding||current_transforms!=transforms||pointer(binding)!=model)return false;
-    player.anchor=info.name; return true;
+    if(current_binding!=binding||current_transforms!=transforms||pointer(binding)!=model)return fail("Model changed during sample");
+    player.anchor=info.name;player.anchor_status="Ready";return true;
 }
 bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& target) {
     if(object.kind==TargetKind::Minion) {
@@ -630,12 +643,16 @@ Snapshot GameReader::sample(ReadOptions options) {
     std::array<uintptr_t,64> chunks{};
     if(!read(system+0x10,chunks)){result.status="Cannot read current entity chunks";return result;}
     for (const auto& controller:controllers_) {
+        uint32_t handle=UINT32_MAX;
+        auto skip=[&](std::string_view reason,std::string_view model={}) {
+            result.skipped_players.push_back({controller.handle,handle,std::string(reason),std::string(model)});
+        };
         auto current=entity(chunks,controller.handle);
-        if (current.address!=controller.address) {++result.invalid_handles;next_enumerate_=0;continue;}
-        std::array<unsigned char,0xd5> controller_fields{};uint32_t handle{};
-        if(!read(controller.address+0x6bc,controller_fields))continue;
+        if (current.address!=controller.address) {++result.invalid_handles;next_enumerate_=0;skip("Controller identity changed");continue;}
+        std::array<unsigned char,0xd5> controller_fields{};
+        if(!read(controller.address+0x6bc,controller_fields)){skip("Cannot read controller fields");continue;}
         std::memcpy(&handle,controller_fields.data(),4);
-        auto pawn=entity(chunks,handle);if (!pawn.address) {++result.invalid_handles;continue;}
+        auto pawn=entity(chunks,handle);if (!pawn.address) {++result.invalid_handles;skip("Controller has no valid pawn");continue;}
         if(controller_fields[0xd4]) {
             result.hero=hero_profile(chunks,pawn);
             result.weapon=weapon_profile(chunks,pawn);
@@ -648,20 +665,26 @@ Snapshot GameReader::sample(ReadOptions options) {
             }else local_motion_={};
             uint32_t current_handle{};
             if(!read(controller.address+0x6bc,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.local_velocity_valid=false;local_motion_={};}
+            skip("Local player");
             continue;
         }
-        if (type(pawn.address).find("CitadelPlayerPawn")==std::string::npos) continue;
+        auto pawn_type=type(pawn.address);
+        if (pawn_type.find("CitadelPlayerPawn")==std::string::npos) {skip(pawn_type.empty()?"Pawn type unavailable":"Unsupported pawn type: "+pawn_type);continue;}
         std::array<unsigned char,0xc0> fields{};
-        if (!read(pawn.address+0x330,fields)) continue;
+        if (!read(pawn.address+0x330,fields)) {skip("Cannot read pawn fields");continue;}
         uintptr_t scene{}; Player p; p.handle=handle;
         std::memcpy(&scene,fields.data(),8);std::memcpy(&p.maximum,fields.data()+0x20,4);std::memcpy(&p.health,fields.data()+0x24,4);
         p.team=fields[0xbf];uint8_t dormant{};
-        if (fields[0x2c] || p.health<=0 || p.maximum<=0 || !scene || !read(scene+0x103,dormant) || dormant) continue;
+        if(fields[0x2c]||p.health<=0){skip("Dead player");continue;}
+        if(p.maximum<=0){skip("Invalid maximum health");continue;}
+        if(!scene){skip("Scene unavailable");continue;}
+        if(!read(scene+0x103,dormant)){skip("Cannot read scene state");continue;}
+        if(dormant){skip("Dormant player");continue;}
         uint32_t disabled_groups{};
         bool hitboxes=options.hitboxes&&read(pawn.address+0xb98,disabled_groups);
-        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups)) {++result.missing_anchors;continue;}
+        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups)) {++result.missing_anchors;skip(p.anchor_status,p.model_name);continue;}
         if(hitboxes){uint32_t after{};if(!read(pawn.address+0xb98,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
-        if (entity(chunks,handle).address!=pawn.address) continue;
+        if (entity(chunks,handle).address!=pawn.address) {skip("Pawn identity changed",p.model_name);continue;}
         if(p.dot_valid[2]&&(velocities_.size()<512||velocities_.contains(handle))){auto& estimate=velocities_[handle];estimate.update(p.dots[2],now);p.velocity=estimate.velocity;p.velocity_valid=estimate.valid;}
         result.players.push_back(std::move(p));
     }
