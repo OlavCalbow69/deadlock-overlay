@@ -72,6 +72,7 @@ struct ReplayCamera {
     float remainder_x{},remainder_y{};
     float line_position{1.f},flight_time{};bool free_mode{},prediction_active{},point_valid{},occluded{};Vec3 aim_point{};
     FreeMovementMode free_movement_mode{FreeMovementMode::BoneLine};int hitbox_index{-1};bool inside_hitbox{};
+    FocusHoldButton hold_button{FocusHoldButton::SideButtons};
     TargetKind kind{TargetKind::None};int target_mask{};
     FocusArea focus_area{};uint64_t attempted_sample{};bool input_blocked{};
     uint64_t moves{},input_failures{};
@@ -110,10 +111,11 @@ struct ReplayCamera {
         desired=std::clamp(desired,-limit,limit);
         auto count=static_cast<LONG>(desired);remainder=desired-float(count);return count;
     }
-    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,FocusArea area_config,double now,FreeMovementMode mode=FreeMovementMode::BoneLine) {
+    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,FocusArea area_config,double now,FreeMovementMode mode=FreeMovementMode::BoneLine,FocusHoldButton selected_hold_button=FocusHoldButton::SideButtons) {
         input.cancel(); // No previous correction survives a changed gate/occlusion state.
+        if(hold_button!=selected_hold_button){release();hold_button=selected_hold_button;}
         if(!input.ready()){release();return;}
-        bool held=(GetAsyncKeyState(VK_XBUTTON1)&0x8000)||(GetAsyncKeyState(VK_XBUTTON2)&0x8000);
+        bool held=focus_button_held(hold_button);
         bool foreground=game&&GetForegroundWindow()==game&&!IsIconic(game);
         if(!camera_allowed(enabled,camera_mode_allowed(snapshot.replay,snapshot.practice,debug_enabled),foreground,menu,held,GetTickCount64(),snapshot.time)){release();return;}
         RECT area{};if(!GetClientRect(game,&area)||area.right<=0||area.bottom<=0){release();return;}
@@ -151,8 +153,8 @@ struct ReplayCamera {
         auto dx=motion(point.x-center.x,dt,remainder_x,speed),dy=motion(point.y-center.y,dt,remainder_y,speed);
         if(!(dx||dy))return;
         // Recheck foreground immediately before sending relative mouse input.
-        if(GetForegroundWindow()!=game)return;
-        if(input.move(game,dx,dy))++moves;
+        if(GetForegroundWindow()!=game||!focus_button_held(hold_button))return;
+        if(input.move(game,dx,dy,hold_button))++moves;
         else {++input_failures;lost=input_blocked=true;point_valid=false;remainder_x=remainder_y=0;}
     }
 };

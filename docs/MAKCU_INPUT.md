@@ -2,7 +2,7 @@
 
 Changed 4 October 2026.
 
-Camera corrections now use `km.move(dx,dy)\r\n` through the MAKCU CH343 management serial port. There is no SendInput/mouse_event fallback. The physical side buttons are still observed through Windows button state, and the existing replay/practice permissions, selected bone, prediction, speed, foreground, freshness and visibility checks remain in effect.
+Camera corrections now use `km.move(dx,dy)\r\n` through the MAKCU CH343 management serial port. There is no SendInput/mouse_event fallback. **Camera Focus → Hold button** selects either side button or left mouse, observed through Windows button state. The existing replay/practice permissions, selected bone, prediction, speed, foreground, freshness and visibility checks remain in effect.
 
 The MAKCU MCP supplied the movement command, version handshake, serial settings, command limits and firmware differences. Read-only probing found this device on COM3 at 4,000,000 baud. Binary firmware-version query returned 4073 (V4.073). No firmware update or persistent device-setting change was performed.
 
@@ -12,7 +12,7 @@ The MAKCU MCP supplied the movement command, version handshake, serial settings,
 - Open exclusively with 8N1 and no hardware/software flow control. Probe 4,000,000 and 115,200 separately; no automatic baud-change command is sent.
 - Require a valid MAKCU identity result line and consume its prompt. An echoed `km.version()` is insufficient. Disable command echo for this session after identification.
 - One worker owns serial reads/writes; the render loop does not open ports or wait for serial I/O. Writes have an eight-millisecond timeout. Periodic version queries detect a lost/unresponsive connection; retry discovery after disconnect.
-- Keep at most one queued correction. A newer update cancels/replaces the old one; stale corrections over 20 ms are discarded. Check foreground and held side button again before writing.
+- Keep at most one queued correction. A newer update cancels/replaces the old one; stale corrections over 20 ms are discarded. Each queued request carries its selected hold button; recheck foreground and that button before writing. Changing the selection cancels previous requests and releases the selected target.
 - Menu, focus release, disabled feature, occlusion and invalid/stale target data cancel queued corrections through the camera update. Shutdown stops/joins the serial worker before console cleanup completes.
 
 A command already handed to the serial driver/device cannot be recalled. Firmware may also interpolate movement; this backend does not alter interpolation settings or claim a guaranteed lower end-to-end latency than SendInput. The queue count measures submitted commands; `makcu.json` separately reports commands actually written, failures and replacements. Successful serial writes do not prove that every HID report reached the game.

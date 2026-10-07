@@ -67,6 +67,7 @@ struct Settings {
     bool sniper_speed_override=true;float sniper_focus_speed=12.f;
     bool free_focus=false,prediction=false,inherit_velocity=false,auto_speed=true;
     FreeMovementMode free_focus_mode{FreeMovementMode::BoneLine};
+    FocusHoldButton focus_hold_button{FocusHoldButton::SideButtons};
     bool visible_only=true;
     bool focus_visuals=true;
     FocusArea focus_area{};
@@ -87,6 +88,7 @@ void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     out<<"skeletons="<<s.skeletons<<"\nfocus_players="<<s.focus_players<<"\nfocus_minions="<<s.focus_minions<<"\nfocus_orbs="<<s.focus_orbs<<'\n';
     out<<"hitboxes="<<s.hitboxes<<'\n';
     out<<"free_focus_mode="<<int(s.free_focus_mode)<<'\n';
+    out<<"focus_hold_button="<<int(s.focus_hold_button)<<'\n';
     out<<"skeleton_visible="<<s.skeleton_visible.x<<' '<<s.skeleton_visible.y<<' '<<s.skeleton_visible.z<<'\n';
     out<<"skeleton_hidden="<<s.skeleton_hidden.x<<' '<<s.skeleton_hidden.y<<' '<<s.skeleton_hidden.z<<'\n';
     for(int i=0;i<3;++i) out<<names[i]<<'='<<colors[i]->x<<' '<<colors[i]->y<<' '<<colors[i]->z<<'\n';
@@ -122,6 +124,7 @@ Settings load(const std::filesystem::path& path=config_path()) {
         else if(key=="focus_orbs") {int n{};if(data>>n)s.focus_orbs=n!=0;}
         else if(key=="free_focus") {int n{};if(data>>n)s.free_focus=n!=0;}
         else if(key=="free_focus_mode") {int n{};if(data>>n)s.free_focus_mode=static_cast<FreeMovementMode>(std::clamp(n,0,1));}
+        else if(key=="focus_hold_button") {int n{};if(data>>n)s.focus_hold_button=static_cast<FocusHoldButton>(std::clamp(n,0,1));}
         else if(key=="prediction") {int n{};if(data>>n)s.prediction=n!=0;}
         else if(key=="inherit_velocity") {int n{};if(data>>n)s.inherit_velocity=n!=0;}
         else if(key=="focus_bone") {int n{};if(data>>n)s.focus_bone=std::clamp(n,0,2);}
@@ -884,9 +887,14 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         snprintf(hero_label,sizeof(hero_label),"Hero: %s%s",snap.hero.name.c_str(),vindicta(snap.hero)?(snap.hero.sniper_valid?(snap.hero.sniper_scoped?"  /  Assassinate scoped":"  /  Assassinate idle"):"  /  Waiting for sniper state"):"");
         text(status.Min+px(20,88),hero_label,true,14);
         char area_hint[160]{};
-        if(app.settings.focus_area.mode==FocusAreaMode::CenterFov)snprintf(area_hint,sizeof(area_hint),"Hold either side button. Center FOV radius: %.1f%% of the shorter screen dimension.",app.settings.focus_area.center_percent);
-        else snprintf(area_hint,sizeof(area_hint),"Hold either side button. %s around selected bone: %.1f m radius.",app.settings.focus_area.mode==FocusAreaMode::TargetBox3D?"3D box":"2D circle",app.settings.focus_area.radius_meters);
+        if(app.settings.focus_area.mode==FocusAreaMode::CenterFov)snprintf(area_hint,sizeof(area_hint),"Center FOV radius: %.1f%%",app.settings.focus_area.center_percent);
+        else snprintf(area_hint,sizeof(area_hint),"%s around selected bone: %.1f m radius",app.settings.focus_area.mode==FocusAreaMode::TargetBox3D?"3D box":"2D circle",app.settings.focus_area.radius_meters);
         text(status.Min+px(20,119),area_hint,true,12);
+        text({status.Max.x-px(335),status.Min.y+px(119)},"Hold button",true,12);
+        constexpr const char* hold_buttons[]={"Either side button","Left mouse"};int hold_button=int(app.settings.focus_hold_button);
+        ImGui::SetCursorScreenPos({status.Max.x-px(225),status.Min.y+px(113)});ImGui::SetNextItemWidth(px(205));
+        if(ImGui::Combo("##focus_hold_button",&hold_button,hold_buttons,2)){app.settings.focus_hold_button=static_cast<FocusHoldButton>(hold_button);changed=true;}
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Choose the button to hold for camera focus.\nApplies to selected-bone focus, Free movement V1 and V2.\nOpening the menu or releasing this button stops focus.");
         auto camera_pos=origin+px(20,236);text(camera_pos,"Camera focus");
         changed|=switch_toggle("replay_focus",{camera_pos.x+px(150),camera_pos.y+px(3)},&app.settings.replay_focus);
         text(origin+px(285,236),"Focus visuals",true,14);
@@ -928,7 +936,12 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             text(origin+px(20,480),"Inherit shooter velocity",true,12);
             changed|=switch_toggle("inherit_velocity",origin+px(200,480),&app.settings.inherit_velocity);
         }
-        if(app.settings.auto_speed)text(origin+px(20,480),!app.settings.free_focus?"Hold either side button to focus the selected bone":app.settings.free_focus_mode==FreeMovementMode::Hitboxes?"V2: hold side button; move freely inside target hitboxes":"V1: hold side button; move freely along the connected bones",true,12);
+        if(app.settings.auto_speed) {
+            char movement_hint[160]{};const char* button=focus_button_label(app.settings.focus_hold_button);
+            if(!app.settings.free_focus)snprintf(movement_hint,sizeof(movement_hint),"Hold %s to focus the selected bone",button);
+            else snprintf(movement_hint,sizeof(movement_hint),"%s: hold %s; move %s",app.settings.free_focus_mode==FreeMovementMode::Hitboxes?"V2":"V1",button,app.settings.free_focus_mode==FreeMovementMode::Hitboxes?"inside target hitboxes":"along the connected bones");
+            text(origin+px(20,480),movement_hint,true,12);
+        }
         ImGui::SetCursorScreenPos({body.Max.x-px(130),origin.y+px(478)});
         if(ImGui::Button("Target types",px(110,30)))ImGui::OpenPopup("Focus targets");
         if(ImGui::BeginPopup("Focus targets")) {
@@ -941,14 +954,14 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             if(ImGui::IsItemHovered())ImGui::SetTooltip("These filters also apply to health bars and markers.");
             int minions=0,orbs=0;for(const auto& target:snap.focus_targets)if(target.kind==TargetKind::Minion)++minions;else if(target.kind==TargetKind::SoulOrb)++orbs;
             ImGui::Separator();ImGui::Text("Available: %zu players / %d minions / %d orbs",snap.players.size(),minions,orbs);
-            ImGui::TextUnformatted("Hold a side button and enter a valid focus area.");
+            ImGui::Text("Hold %s and enter a valid focus area.",focus_button_label(app.settings.focus_hold_button));
             ImGui::EndPopup();
         }
         text(origin+px(20,517),
              !app.settings.replay_focus ? "Focus disabled"
              : app.settings.visible_only && !snap.visibility ? "Waiting for map collision mesh"
              : app.camera.occluded ? "Focus point blocked"
-             : app.camera.input_blocked ? "Input failed; release the side button to retry"
+             : app.camera.input_blocked ? "Input failed; release the hold button to retry"
              : app.settings.free_focus && app.settings.free_focus_mode==FreeMovementMode::Hitboxes && app.settings.focus_players && std::none_of(snap.players.begin(),snap.players.end(),[](const auto& player){return !player.hitboxes.empty();}) ? "V2 waiting for player hitboxes"
              : app.camera.lost ? "Hold and move into a valid focus area"
              : app.settings.prediction
@@ -1116,6 +1129,10 @@ int render_test() {
         app.settings.free_focus=true;app.settings.free_focus_mode=FreeMovementMode::Hitboxes;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
         if(ok)ok=capture(app.settings_window,executable_directory()/L"free-movement-v2-preview.png",true);
+        app.settings.focus_hold_button=FocusHoldButton::LeftMouse;
+        for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
+        if(ok)ok=capture(app.settings_window,executable_directory()/L"left-mouse-focus-preview.png",true);
+        app.settings.focus_hold_button=FocusHoldButton::SideButtons;
         app.settings.free_focus=false;app.settings.free_focus_mode=FreeMovementMode::BoneLine;
         app.menu_page=solace::shell_page::connection;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
@@ -1281,7 +1298,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
             &&(app.settings.replay_focus||app.settings.focus_visuals)&&(app.settings.focus_players||app.settings.focus_minions);
         app.read_options.store((app.settings.skeletons?1u:0u)|(app.settings.focus_minions?2u:0u)|(app.settings.focus_orbs?4u:0u)|((app.settings.hitboxes||hitbox_focus)?8u:0u));
         auto focus_speed=hero_focus_speed(snapshot.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed);
-        app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms(),app.settings.free_focus_mode);
+        app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms(),app.settings.free_focus_mode,app.settings.focus_hold_button);
         app.sampling=focused;
         // Input and foreground checks run before GPU pacing. A saturated queue is
         // polled with a bounded wait, without dropping a prepared render frame.
@@ -1376,8 +1393,8 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
             makcu_report<<"{\"backend\":\"makcu\",\"connected\":"<<(app.makcu.ready()?"true":"false")
                 <<",\"status\":\""<<escaped(app.makcu.status())<<"\",\"commands_sent\":"<<app.makcu.sent()
                 <<",\"write_failures\":"<<app.makcu.failures()<<",\"superseded_commands\":"<<app.makcu.replaced()
-                <<",\"free_movement_available\":true,\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\"}\n";
-            std::ofstream camera_report(executable_directory()/L"camera.json");camera_report<<"{\"effective_speed\":"<<focus_speed<<",\"sniper_speed_active\":"<<(sniper_speed_active(snapshot.hero,app.settings.sniper_speed_override)?"true":"false")<<",\"sniper_focus_speed\":"<<app.settings.sniper_focus_speed<<",\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(app.settings.debug_focus?"true":"false")<<",\"enabled\":"<<(app.settings.replay_focus?"true":"false")<<",\"speed\":"<<app.settings.focus_speed<<",\"bone\":"<<app.settings.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"free_movement\":"<<(app.settings.free_focus?"true":"false")<<",\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\",\"hitbox_index\":"<<app.camera.hitbox_index<<",\"inside_hitbox\":"<<(app.camera.inside_hitbox?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(app.settings.prediction?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.settings.auto_speed?snapshot.weapon.speed:app.settings.projectile_speed)<<",\"auto_speed\":"<<(app.settings.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(app.settings.focus_area.mode)<<",\"focus_fov_percent\":"<<app.settings.focus_area.center_percent<<",\"focus_radius_meters\":"<<app.settings.focus_area.radius_meters<<",\"show_focus_area\":"<<(show_focus_area(app.settings)?"true":"false")<<"}\n";
+                <<",\"hold_button\":\""<<focus_button_name(app.settings.focus_hold_button)<<"\",\"free_movement_available\":true,\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\"}\n";
+            std::ofstream camera_report(executable_directory()/L"camera.json");camera_report<<"{\"effective_speed\":"<<focus_speed<<",\"sniper_speed_active\":"<<(sniper_speed_active(snapshot.hero,app.settings.sniper_speed_override)?"true":"false")<<",\"sniper_focus_speed\":"<<app.settings.sniper_focus_speed<<",\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(app.settings.debug_focus?"true":"false")<<",\"enabled\":"<<(app.settings.replay_focus?"true":"false")<<",\"speed\":"<<app.settings.focus_speed<<",\"bone\":"<<app.settings.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"hold_button\":\""<<focus_button_name(app.settings.focus_hold_button)<<"\",\"free_movement\":"<<(app.settings.free_focus?"true":"false")<<",\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\",\"hitbox_index\":"<<app.camera.hitbox_index<<",\"inside_hitbox\":"<<(app.camera.inside_hitbox?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(app.settings.prediction?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.settings.auto_speed?snapshot.weapon.speed:app.settings.projectile_speed)<<",\"auto_speed\":"<<(app.settings.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(app.settings.focus_area.mode)<<",\"focus_fov_percent\":"<<app.settings.focus_area.center_percent<<",\"focus_radius_meters\":"<<app.settings.focus_area.radius_meters<<",\"show_focus_area\":"<<(show_focus_area(app.settings)?"true":"false")<<"}\n";
             if(timing_frames){std::ofstream perf(executable_directory()/L"frame-performance.json");perf<<"{\"frames\":"<<timing_frames<<",\"priority_class\":"<<GetPriorityClass(GetCurrentProcess())<<",\"composition\":"<<(app.bar_window.renderer.composition()?"true":"false")<<",\"busy_bar_presents\":"<<app.bar_window.busy_presents<<",\"busy_menu_presents\":"<<app.settings_window.busy_presents<<",\"menu_open\":"<<(app.show_settings?"true":"false")<<",\"work_ms\":"<<work_sum/timing_frames<<",\"submit_ms\":"<<submit_sum/timing_frames<<",\"present_ms\":"<<present_sum/timing_frames<<",\"queue_wait_ms\":"<<queue_wait_sum/timing_frames<<",\"wait_ms\":"<<wait_sum/timing_frames<<",\"max_work_ms\":"<<work_max<<",\"max_present_ms\":"<<present_max<<",\"reader_ms\":"<<snapshot.sample_us/1000<<"}\n";}
             work_sum=wait_sum=submit_sum=present_sum=queue_wait_sum=work_max=present_max=0;timing_frames=0;
             std::ofstream trace(executable_directory()/L"frame-trace.json");trace<<"{\"status\":\""<<escaped(app.frame_status)<<"\",\"enabled\":"<<(trace_frames?"true":"false")<<",\"error\":"<<game_frames.error()<<",\"events\":"<<game_frames.count()<<",\"delivery_delay_ms\":"<<game_frames.delay_ms()<<"}\n";last_report=now;}

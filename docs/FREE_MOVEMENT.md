@@ -2,11 +2,13 @@
 
 Open **Insert → Camera Focus → Free movement** and choose one mode:
 
-| Choice | Behavior while either mouse side button is held |
+| Choice | Behavior while the selected Hold button is held |
 | --- | --- |
 | Off | Focus the selected Head, Body or Pelvis bone. |
 | V1: Bone line | Keep the original nearest-point rule on the head–body–pelvis line. Movement along the line is free; correction brings the crosshair back to its closest point. |
 | V2: Full hitboxes | Move freely anywhere within the projected union of the target's animated hitboxes, including arms and legs. Outside that union, correct toward the closest point in a hitbox. |
+
+**Camera Focus → Hold button** chooses **Either side button** or **Left mouse** for all three modes. The selected button must stay held, and releasing it cancels queued corrections. Existing configurations default to side buttons. The choice persists as `focus_hold_button` (`0` = side buttons, `1` = left mouse), and camera/Makcu diagnostics report it as `hold_button`.
 
 V2 uses the full capsule, sphere and oriented box volumes, independently of the wireframes used for drawing. Gaps between hitboxes remain gaps. A ray through any volume produces no correction or accumulated fractional movement. Outside the volumes, screen-space distance finds the nearest boundary; perspective interpolation preserves the corresponding world position. Geometry calculations use the game's current render matrix, including aspect-ratio changes and zoom.
 

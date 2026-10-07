@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "focus_input.h"
 #include <setupapi.h>
 #include <algorithm>
 #include <atomic>
@@ -29,6 +30,7 @@ inline bool makcu_identity(const std::string& response) {
 }
 struct MakcuPending {
     HWND window{};std::string command;uint64_t created{},generation{};
+    FocusHoldButton hold_button{FocusHoldButton::SideButtons};
 };
 inline bool makcu_fresh(uint64_t now,uint64_t created) {return created&&now>=created&&now-created<=20;}
 class MakcuInput {
@@ -130,7 +132,7 @@ class MakcuInput {
                 if(stopping_)break;
                 if(!request.command.empty()&&request.generation==generation_.load()&&makcu_fresh(GetTickCount64(),request.created)
                     &&IsWindow(request.window)&&!IsIconic(request.window)&&GetForegroundWindow()==request.window
-                    &&((GetAsyncKeyState(VK_XBUTTON1)|GetAsyncKeyState(VK_XBUTTON2))&0x8000)) {
+                    &&focus_button_held(request.hold_button)) {
                     ok=write(handle,request.command);if(ok)++sent_;else ++failures_;
                 }
                 if(ok)ok=read(handle,received);
@@ -151,9 +153,9 @@ public:
     void start(){if(!worker_.joinable()){stopping_=false;worker_=std::thread([this]{loop();});}}
     void stop(){stopping_=true;cancel();wake_.notify_all();if(worker_.joinable())worker_.join();}
     void cancel(){++generation_;std::lock_guard lock(mutex_);pending_={};}
-    bool move(HWND game,long x,long y) {
+    bool move(HWND game,long x,long y,FocusHoldButton hold_button=FocusHoldButton::SideButtons) {
         auto command=makcu_move_command(x,y);if(!connected_||command.empty())return false;
-        {std::lock_guard lock(mutex_);if(!pending_.command.empty())++replaced_;pending_={game,std::move(command),GetTickCount64(),generation_.load()};}
+        {std::lock_guard lock(mutex_);if(!pending_.command.empty())++replaced_;pending_={game,std::move(command),GetTickCount64(),generation_.load(),hold_button};}
         wake_.notify_one();return true;
     }
     bool ready()const{return connected_.load();}
