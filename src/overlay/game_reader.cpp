@@ -11,9 +11,6 @@
 
 namespace overlay {
 namespace {
-// Build 6759 client: field layouts checked against the fresh 7 October dump,
-// globals checked against unique signatures and RIP-relative references.
-constexpr char supported[] = "b48636d0282a3f6916725e1701c0454738bb5a4903e83fc96a27b01dce800d23";
 std::string sha256(const std::vector<unsigned char>& bytes) {
     BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{};
     if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0)<0) return {};
@@ -30,33 +27,14 @@ std::string sha256(const std::vector<unsigned char>& bytes) {
     for (auto b:digest) result<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(b);
     return result.str();
 }
-std::vector<int> pattern(const char* text) {
-    std::istringstream stream(text); std::string token; std::vector<int> result;
-    while (stream>>token) result.push_back(token=="?" ? -1 : std::stoi(token,nullptr,16));
-    return result;
-}
-// Resolve only a unique match in an executable PE section, yielding an image RVA.
-uintptr_t scan(const std::vector<unsigned char>& file, const char* signature) {
+uint32_t image_size(const std::vector<unsigned char>& file) {
     if (file.size()<sizeof(IMAGE_DOS_HEADER)) return 0;
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(file.data());
     if (dos->e_magic!=IMAGE_DOS_SIGNATURE || dos->e_lfanew<0
         || size_t(dos->e_lfanew)+sizeof(IMAGE_NT_HEADERS64)>file.size()) return 0;
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS64*>(file.data()+dos->e_lfanew);
     if (nt->Signature!=IMAGE_NT_SIGNATURE) return 0;
-    auto section=IMAGE_FIRST_SECTION(nt); auto p=pattern(signature); uintptr_t found{}; int matches{};
-    if (reinterpret_cast<const unsigned char*>(section+nt->FileHeader.NumberOfSections)>file.data()+file.size()) return 0;
-    for (unsigned s=0;s<nt->FileHeader.NumberOfSections;++s) {
-        if (!(section[s].Characteristics&IMAGE_SCN_MEM_EXECUTE)) continue;
-        const size_t begin=section[s].PointerToRawData, size=section[s].SizeOfRawData;
-        if (begin+size>file.size() || size<p.size()) continue;
-        for (size_t i=0;i<=size-p.size();++i) {
-            if (p[0]>=0 && file[begin+i]!=p[0]) continue;
-            bool match=true;
-            for (size_t j=1;j<p.size();++j) if (p[j]>=0 && file[begin+i+j]!=p[j]) {match=false;break;}
-            if (match) {found=section[s].VirtualAddress+i;++matches;}
-        }
-    }
-    return matches==1 ? found : 0;
+    return nt->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC?nt->OptionalHeader.SizeOfImage:0;
 }
 }
 GameReader::~GameReader() { detach(); }
@@ -121,42 +99,33 @@ bool GameReader::attach() {
     if (path.empty()) {status_="Waiting for client.dll (or insufficient access)";return false;}
     std::ifstream input(std::filesystem::path(path),std::ios::binary);
     std::vector<unsigned char> file{std::istreambuf_iterator<char>(input),{}};
-    if (sha256(file)!=supported) {status_="Unsupported client.dll: update required";next_attach_=now+10000;return false;}
     std::ifstream engine_input(std::filesystem::path(engine_path),std::ios::binary);
     std::vector<unsigned char> engine_file{std::istreambuf_iterator<char>(engine_input),{}};
-    if(sha256(engine_file)!="084c45473667c65174a9a19c428359ac335c3e990008dbf26c0eef91be44784c")engine_base_=0;
     std::ifstream world_input(std::filesystem::path(world_path),std::ios::binary);
     std::vector<unsigned char> world_file{std::istreambuf_iterator<char>(world_input),{}};
-    if(sha256(world_file)!="bae38ed919214dcd74d49f9f01419f7ab2c86a57af666b4308f51241e9ff9888")world_renderer_base_=0;
+    auto client_hash=sha256(file),engine_hash=sha256(engine_file),world_hash=sha256(world_file);
+    if(!image_size(file)||!image_size(engine_file)||!image_size(world_file)) {status_="Waiting for complete game DLLs";return false;}
+    wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
+    auto profile_file=profile_file_.empty()?std::filesystem::path(executable).parent_path()/L"data"/L"reader-profiles"/(client_hash+".ini"):profile_file_;
+    profile_=ReaderProfile{};
+    const bool built_in=client_hash==ReaderProfile::client_hash&&engine_hash==ReaderProfile::engine_hash&&world_hash==ReaderProfile::world_hash;
+    if(!profile_file_.empty()||!built_in||std::filesystem::exists(profile_file)) {
+        if(!profile_.load(profile_file,client_hash,engine_hash,world_hash,image_size(file),image_size(engine_file),image_size(world_file),status_)) {
+            next_attach_=now+10000;return false;
+        }
+    }
     process_=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|SYNCHRONIZE,FALSE,target);
     if (!process_) {status_="Read access denied; try Run as administrator";return false;}
     pid_=target;
-    auto system=scan(file,"48 8B 0D ? ? ? ? 8B D0 E8 ? ? ? ? 48 85 C0 74 ? 48 8B 40 10");
-    auto transform=scan(file,"40 53 48 83 EC 30 48 83 3D ? ? ? ? 00 48 8B DA 74 ? 48 8B D1 48 8D 4C 24 ? E8");
-    if (!system || !transform) {status_="Signatures missing or ambiguous";detach();return false;}
-    int32_t displacement{};
-    if (!read(base_+system+3,displacement)) {status_="Cannot read entity signature";detach();return false;}
-    entity_slot_=base_+system+7+displacement;
-    std::array<unsigned char,64> instructions{};
-    if (!read(base_+transform,instructions)) {status_="Cannot read projection signature";detach();return false;}
-    int matches{};
-    for (size_t i=0;i+7<=instructions.size();++i) {
-        if (instructions[i]==0x48 && instructions[i+1]==0x8d && instructions[i+2]==0x0d) {
-            std::memcpy(&displacement,instructions.data()+i+3,4);
-            matrix_address_=base_+transform+i+7+displacement; ++matches;
-        }
-    }
-    if (matches!=1 || entity_slot_-base_!=0x3c4ba40 || matrix_address_-base_!=0x3c80ae0) {
-        status_="Resolved addresses differ from validated profile";detach();return false;
-    }
+    entity_slot_=base_+profile_.addresses.entity_system;
     // ScreenTransform uses the legacy CViewSetup aspect override. The actual
     // renderer uses CViewRender's compact view at +0x10, whose final world-to-clip
     // matrix is +0x288. Its native horizontal FOV already includes zoom/overrides.
     // CViewRender initializer client+0x092810, matrix product client+0x2195400.
-    if(pointer(base_+0x3689a70)!=base_+0x26896b8) {
+    if(pointer(base_+profile_.addresses.render_view)!=base_+profile_.addresses.render_vtable) {
         status_="Cannot validate final render view";detach();return false;
     }
-    matrix_address_=base_+0x3689a70+0x298;
+    matrix_address_=base_+profile_.addresses.render_view+0x298;
     // Hero IDs and names come from the current game's hero table and localization,
     // rather than a list that becomes stale when heroes are added or renamed.
     auto game_directory=std::filesystem::path(path).parent_path().parent_path().parent_path();
@@ -171,7 +140,7 @@ bool GameReader::attach() {
     status_="Connected to validated client.dll"; return true;
 }
 bool GameReader::read_projection(Snapshot& result) const {
-    const auto view=base_+0x3689a70;
+    const auto view=base_+profile_.addresses.render_view;
     for(int attempt=0;attempt<3;++attempt) {
         uint8_t updating{},after{};std::array<float,8> camera{};
         if(!read(view+0x1330,updating)||updating)continue;
@@ -184,6 +153,16 @@ bool GameReader::read_projection(Snapshot& result) const {
     }
     return false;
 }
+bool GameReader::pawn_fields(uintptr_t address,FocusTarget& target,uintptr_t& scene,uint8_t& life) const {
+    const auto& f=profile_.fields;
+    auto first=std::min({f.scene_node,f.max_health,f.health,f.life_state,f.team});
+    auto last=std::max({f.scene_node+8,f.max_health+4,f.health+4,f.life_state+1,f.team+1});
+    std::array<unsigned char,4096> block;
+    if(last-first>block.size()||!read(address+first,block.data(),last-first))return false;
+    std::memcpy(&scene,block.data()+f.scene_node-first,8);
+    std::memcpy(&target.maximum,block.data()+f.max_health-first,4);std::memcpy(&target.health,block.data()+f.health-first,4);
+    life=block[f.life_state-first];target.team=block[f.team-first];return true;
+}
 void GameReader::clear_map_cache() {
     loaded_map_.clear();map_array_=map_rep_=map_world_=map_path_=0;map_count_=0;map_index_=-1;next_map_resolve_=0;
 }
@@ -192,8 +171,8 @@ std::string GameReader::loaded_arena(uint64_t now) {
     if(!world_renderer_base_)return unavailable("Streamed map needs a supported worldrenderer.dll profile");
     // Profile validated by the worldrenderer.dll hash on attach. This is the
     // active CSingleWorldRep vector, not the resource cache containing old maps.
-    auto manager=world_renderer_base_+0x1d9760;
-    if(pointer(manager)!=world_renderer_base_+0x14c720)return unavailable("Waiting for world renderer");
+    auto manager=world_renderer_base_+profile_.addresses.world_manager;
+    if(pointer(manager)!=world_renderer_base_+profile_.addresses.world_manager_vtable)return unavailable("Waiting for world renderer");
     std::array<unsigned char,24> header{};int count{};uint32_t capacity{};uintptr_t array{};
     if(!read(manager+0x90,header))return unavailable("Cannot read loaded map worlds");
     std::memcpy(&count,header.data(),4);std::memcpy(&array,header.data()+8,8);std::memcpy(&capacity,header.data()+16,4);
@@ -202,16 +181,16 @@ std::string GameReader::loaded_arena(uint64_t now) {
     // Cheap identity checks between full scans prevent reusing a removed world.
     if(now<next_map_resolve_&&map_index_>=0&&map_index_<count&&count==map_count_&&array==map_array_
         &&pointer(array+size_t(map_index_)*8)==map_rep_&&pointer(map_rep_+0x30)==map_world_
-        &&pointer(map_world_)==world_renderer_base_+0x14b6f0&&pointer(map_world_+0x240)==map_path_)return loaded_map_;
+        &&pointer(map_world_)==world_renderer_base_+profile_.addresses.world_vtable&&pointer(map_world_+0x240)==map_path_)return loaded_map_;
     std::vector<uintptr_t> entries(size_t(count),0);
     if(!read(array,entries.data(),entries.size()*8))return unavailable("Waiting for stable map-world list");
     std::string selected;uintptr_t selected_rep{},selected_world{},selected_path{};int selected_index=-1;
     for(int index=0;index<count;++index) {
         auto rep=entries[index];if(!rep)continue;
         std::array<uintptr_t,8> fields{};
-        if(!read(rep,fields)||fields[0]!=world_renderer_base_+0x14c460)return unavailable("Waiting for stable map-world entries");
+        if(!read(rep,fields)||fields[0]!=world_renderer_base_+profile_.addresses.world_rep_vtable)return unavailable("Waiting for stable map-world entries");
         auto world=fields[6];if(!world)continue;
-        if(pointer(world)!=world_renderer_base_+0x14b6f0)return unavailable("Invalid streamed-world instance");
+        if(pointer(world)!=world_renderer_base_+profile_.addresses.world_vtable)return unavailable("Invalid streamed-world instance");
         auto path=pointer(world+0x240);if(!path)continue;
         auto resource=text(path,160);if(resource.empty())return unavailable("Waiting for loaded-world resource name");
         auto candidate=visibility_world_map_key(resource);if(candidate.empty())continue;
@@ -321,10 +300,13 @@ bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
 }
 bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitboxes,uint32_t disabled_groups) {
     auto fail=[&](const char* reason){player.anchor_status=reason;return false;};
-    std::array<unsigned char,0x28> model_state{};
-    if(!read(scene+0x1c0,model_state))return fail("Cannot read model state");
+    const auto transform_offset=profile_.fields.model_state+0x80;
+    const auto binding_offset=profile_.fields.model_state+profile_.fields.model_handle;
+    const auto first_field=std::min(transform_offset,binding_offset),state_size=std::max(transform_offset,binding_offset)-first_field+8;
+    std::array<unsigned char,256> model_state{};
+    if(state_size>model_state.size()||!read(scene+first_field,model_state.data(),state_size))return fail("Cannot read model state");
     uintptr_t binding{},transforms{};
-    std::memcpy(&transforms,model_state.data(),8);std::memcpy(&binding,model_state.data()+0x20,8);
+    std::memcpy(&transforms,model_state.data()+transform_offset-first_field,8);std::memcpy(&binding,model_state.data()+binding_offset-first_field,8);
     auto model=pointer(binding);
     if (!model || !transforms) return fail("Model or transforms unavailable");
     auto found=models_.find(model);
@@ -357,12 +339,12 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     auto& info=found->second; int16_t count{};
     player.model_name=info.model_name;player.bone_rig=info.rig;
     if(info.index<0)return fail(info.error.c_str());
-    if(!read(scene+0x3e0,count)||count!=info.count||info.index>=count)return fail("Model and live bone counts differ");
+    if(!read(scene+profile_.fields.model_state+0x2a0,count)||count!=info.count||info.index>=count)return fail("Model and live bone counts differ");
     const BoneInfo::HitboxSet* hitbox_set=nullptr;uint64_t body_mask{};uint8_t set_index{};
     if(hitboxes) {
         auto now=GetTickCount64();
         if(!info.hitboxes_loaded&&now>=info.next_hitbox_load) {info.next_hitbox_load=now+1000;load_hitboxes(model,info);}
-        if(info.hitboxes_loaded&&read(scene+0x348,body_mask)&&read(scene+0x40c,set_index)) {
+        if(info.hitboxes_loaded&&read(scene+profile_.fields.model_state+profile_.fields.mesh_mask,body_mask)&&read(scene+profile_.fields.hitbox_set,set_index)) {
             if(set_index<info.hitbox_hashes.size())for(const auto& set:info.hitbox_sets)
                 if((set.mesh_mask&body_mask)&&set.hash==info.hitbox_hashes[set_index]){hitbox_set=&set;break;}
             player.hitbox_set=set_index;
@@ -384,7 +366,7 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     }
     if(hitbox_set) {
         std::array<float,8> root{};bool root_valid=false;
-        if(std::any_of(hitbox_set->boxes.begin(),hitbox_set->boxes.end(),[](const auto& box){return box.bone<0;}))root_valid=read(scene+0x10,root);
+        if(std::any_of(hitbox_set->boxes.begin(),hitbox_set->boxes.end(),[](const auto& box){return box.bone<0;}))root_valid=read(scene+profile_.fields.node_world,root);
         player.hitboxes.reserve(hitbox_set->boxes.size());
         for(const auto& box:hitbox_set->boxes) {
             if(disabled_groups&(1u<<box.group))continue;
@@ -394,35 +376,35 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
             if(world_hitbox(box,transform,world))player.hitboxes.push_back(world);
         }
         uint64_t mask_after{};uint8_t set_after{};
-        if(!read(scene+0x348,mask_after)||!read(scene+0x40c,set_after)||mask_after!=body_mask||set_after!=set_index) {
+        if(!read(scene+profile_.fields.model_state+profile_.fields.mesh_mask,mask_after)||!read(scene+profile_.fields.hitbox_set,set_after)||mask_after!=body_mask||set_after!=set_index) {
             player.hitboxes.clear();player.hitbox_status="Hitbox set changed during sample";
         }
     }
     // Do not publish a transform if the model/array changed during the sample.
-    std::array<unsigned char,0x28> current_state{};
-    if(!read(scene+0x1c0,current_state))return fail("Cannot recheck model state");
+    std::array<unsigned char,256> current_state{};
+    if(!read(scene+first_field,current_state.data(),state_size))return fail("Cannot recheck model state");
     uintptr_t current_binding{},current_transforms{};
-    std::memcpy(&current_transforms,current_state.data(),8);std::memcpy(&current_binding,current_state.data()+0x20,8);
+    std::memcpy(&current_transforms,current_state.data()+transform_offset-first_field,8);std::memcpy(&current_binding,current_state.data()+binding_offset-first_field,8);
     if(current_binding!=binding||current_transforms!=transforms||pointer(binding)!=model)return fail("Model changed during sample");
     player.anchor=info.name;player.anchor_status="Ready";return true;
 }
 bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& target) {
     if(object.kind==TargetKind::Minion) {
         Player bones;uint32_t disabled_groups{};
-        bool hitboxes=options_.hitboxes&&read(object.address+0xb98,disabled_groups);
+        bool hitboxes=options_.hitboxes&&read(object.address+profile_.fields.disabled_groups,disabled_groups);
         if(anchor(scene,bones,false,hitboxes,disabled_groups)&&bones.dot_valid[0]&&bones.dot_valid[2]) {
-            if(hitboxes){uint32_t after{};if(!read(object.address+0xb98,after)||after!=disabled_groups)bones.hitboxes.clear();}
+            if(hitboxes){uint32_t after{};if(!read(object.address+profile_.fields.disabled_groups,after)||after!=disabled_groups)bones.hitboxes.clear();}
             if(!bones.dot_valid[1]){bones.dots[1]=mul(add(bones.dots[0],bones.dots[2]),.5f);bones.dot_valid[1]=true;}
             target.hitboxes=std::move(bones.hitboxes);
             target.dots=bones.dots;target.dot_valid=bones.dot_valid;return true;
         }
     }
     std::array<float,8> world_transform{};
-    if(!read(scene+0x10,world_transform))return false;
+    if(!read(scene+profile_.fields.node_world,world_transform))return false;
     // C_BaseEntity's collision pointer and CCollisionProperty mins/maxs were
     // verified in this client's metadata. Avoid aiming at a minion's feet.
-    auto collision=pointer(object.address+0x340);std::array<Vec3,2> bounds{};
-    bool bounds_valid=collision&&read(collision+0x40,bounds)&&finite(bounds[0])&&finite(bounds[1]);
+    auto collision=pointer(object.address+profile_.fields.collision);std::array<Vec3,2> bounds{};
+    bool bounds_valid=collision&&read(collision+profile_.fields.collision_min,bounds)&&finite(bounds[0])&&finite(bounds[1]);
     if(bounds_valid)for(int axis=0;axis<3;++axis) {
         const float low=axis==0?bounds[0].x:axis==1?bounds[0].y:bounds[0].z;
         const float high=axis==0?bounds[1].x:axis==1?bounds[1].y:bounds[1].z;
@@ -446,23 +428,26 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
     if(type(pawn.address)!=".?AVC_CitadelPlayerPawn@@")return result;
     // CCitadelHeroComponent::GetHeroData, client+0x767600: spawned, loading,
     // then no-spawn ID. CitadelHeroSpawnData_t has a vtable before its ID.
-    std::array<unsigned char,0x40> component{},again{};
-    if(!read(pawn.address+0x1620,component))return result;
-    for(auto offset:{0x20,0x30,0x38}) {
+    const auto& f=profile_.fields;
+    std::array<uint32_t,3> hero_offsets{f.hero_spawned+f.spawn_id,f.hero_loading+f.spawn_id,f.hero_unspawned};
+    size_t component_size=*std::max_element(hero_offsets.begin(),hero_offsets.end())+4;
+    std::array<unsigned char,4096> component{},again{};
+    if(component_size>component.size()||!read(pawn.address+f.hero_component,component.data(),component_size))return result;
+    for(auto offset:hero_offsets) {
         int id{};std::memcpy(&id,component.data()+offset,4);
         if(id){result.id=id;break;}
     }
     std::array<uintptr_t,2> table{}; // count/padding and data; cache capacity follows.
-    if(result.id<=0||!read(base_+0x36eded8,table))return result;
+    if(result.id<=0||!read(base_+profile_.addresses.hero_table,table))return result;
     auto count=uint32_t(table[0]);auto array=table[1];
     if(count>1024||uint32_t(result.id)>=count||!array)return result;
     auto record=pointer(array+size_t(result.id)*8);int record_id{};
-    if(!record||!read(record+0x28,record_id)||record_id!=result.id)return result;
+    if(!record||!read(record+profile_.fields.hero_id,record_id)||record_id!=result.id)return result;
     auto cached=heroes_.find(result.id);
     if(cached==heroes_.end()||cached->second.address!=record) {
         if(heroes_.size()>=256)heroes_.clear();
-        auto sort=text(pointer(record+0x30),100);auto token=hero_token(sort);
-        if(token.empty())token=hero_token(text(pointer(record+0x38),100));
+        auto sort=text(pointer(record+profile_.fields.hero_sort),100);auto token=hero_token(sort);
+        if(token.empty())token=hero_token(text(pointer(record+profile_.fields.hero_search),100));
         if(token.empty())return result;
         auto label=hero_names_.find(token);
         if(label==hero_names_.end())label=hero_names_.find(token+"_sort");
@@ -474,7 +459,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
     result.ability_status="No hero-specific focus profile";
     if(vindicta(result)) {
         result.ability_status="Waiting for Assassinate";
-        auto abilities=pawn.address+0x1440+0x68;
+        auto abilities=pawn.address+profile_.fields.ability_component+profile_.fields.abilities;
         std::array<unsigned char,24> header{},header_after{};
         int size{};uint32_t capacity{};uintptr_t data{};
         if(read(abilities,header)) {
@@ -495,8 +480,8 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
                         // The actual game tests != 0 here and clears it on unscope:
                         // scope client+0xFB5DB0, unscope client+0xFD1FF0.
                         float after{};
-                        if(read(sniper.address+0x1fe4,result.scope_start)&&std::isfinite(result.scope_start)&&result.scope_start>=0
-                            &&read(sniper.address+0x1fe4,after)&&after==result.scope_start
+                        if(read(sniper.address+profile_.fields.sniper_scope,result.scope_start)&&std::isfinite(result.scope_start)&&result.scope_start>=0
+                            &&read(sniper.address+profile_.fields.sniper_scope,after)&&after==result.scope_start
                             &&entity(chunks,sniper_handle_).address==sniper.address) {
                             result.sniper_valid=true;result.sniper_scoped=sniper_scope(result.scope_start);
                             result.ability_status=result.sniper_scoped?"Assassinate scoped":"Assassinate idle";
@@ -507,7 +492,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
         }
     }else {ability_pawn_=0;sniper_handle_=UINT32_MAX;ability_handles_.clear();}
     std::array<uintptr_t,2> table_after{};
-    if(!read(pawn.address+0x1620,again)||again!=component||!read(base_+0x36eded8,table_after)||table_after!=table
+    if(!read(pawn.address+profile_.fields.hero_component,again.data(),component_size)||again!=component||!read(base_+profile_.addresses.hero_table,table_after)||table_after!=table
         ||pointer(array+size_t(result.id)*8)!=record||entity(chunks,pawn.handle).address!=pawn.address)return {};
     return result;
 }
@@ -515,7 +500,7 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     WeaponProfile result;
     if(type(pawn.address).find("CitadelPlayerPawn")==std::string::npos)return result;
     // Primary slot 21 in CCitadelAbilityComponent's handle map. Follow its live hash chain.
-    std::array<unsigned char,72> map{};auto component=pawn.address+0x1440;
+    std::array<unsigned char,72> map{};auto component=pawn.address+profile_.fields.ability_component;
     if(!read(component+24,map))return result;
     uint32_t buckets{},bucket_capacity{},entry_capacity{},count{};uintptr_t bucket_array{},entries{};
     std::memcpy(&buckets,map.data(),4);std::memcpy(&bucket_capacity,map.data()+4,4);std::memcpy(&bucket_array,map.data()+8,8);
@@ -533,11 +518,11 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     }
     auto ability=entity(chunks,handle);if(!ability.address||type(ability.address).find("PrimaryWeapon")==std::string::npos)return result;
     auto vdata=pointer(ability.address+0x390);if(!vdata)return result;
-    std::array<unsigned char,32> weapon_map{};if(!read(vdata+368,weapon_map))return result;
+    std::array<unsigned char,32> weapon_map{};if(!read(vdata+profile_.fields.weapon_map,weapon_map))return result;
     uint32_t capacity{};uintptr_t array{};int root{};
     std::memcpy(&capacity,weapon_map.data()+12,4);capacity&=0x7fffffff;
     std::memcpy(&array,weapon_map.data()+16,8);std::memcpy(&root,weapon_map.data()+24,4);
-    auto primary=pointer(base_+0x34883a8);uintptr_t info{};
+    auto primary=pointer(base_+profile_.addresses.primary_weapon);uintptr_t info{};
     if(!primary||!array||capacity>128)return result;
     for(uint32_t steps=0;steps<capacity&&root>=0&&uint32_t(root)<capacity;++steps){
         std::array<unsigned char,24> node{};auto address=array+0x8e8*size_t(root);
@@ -552,7 +537,7 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     // Aggregate reader client+0x129EF30 uses +0x210 version, +0x214 dirty
     // words and 0x30-byte mirrors beginning at +0x400.
     constexpr uint32_t speed_index=171,version_offset=0x210,dirty_offset=0x214,cache_offset=0x400;
-    auto prop=pointer(pawn.address+0x348);uint32_t version_before{},version_after{};
+    auto prop=pointer(pawn.address+profile_.fields.modifier_property);uint32_t version_before{},version_after{};
     std::array<uint8_t,2> groups{};
     if(!prop||!read(prop+version_offset,version_before)||!read(prop+160+speed_index,groups))return result;
     if(groups[1]!=255){result.status="Weapon speed override active";return result;}
@@ -560,18 +545,18 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
         result.status="Waiting for fresh bullet-speed modifier";
         uint8_t policy{},fallback{};uint16_t dirty{};
         // The engine writes this mirror even when its cache-read optimization is disabled.
-        if(!read(base_+0x3bee0c0+speed_index,policy)||!read(base_+0x3bee1bc,fallback)||!read(prop+dirty_offset+2*speed_index,dirty))return result;
+        if(!read(base_+profile_.addresses.modifier_policy+speed_index,policy)||!read(base_+profile_.addresses.modifier_fallback,fallback)||!read(prop+dirty_offset+2*speed_index,dirty))return result;
         if(!policy)policy=fallback;
         std::array<uint32_t,12> cache{},again{};
         if(!read(prop+cache_offset+48*speed_index,cache))return result;
         float bonus{};std::memcpy(&bonus,&cache[8],4);uint32_t tick{};
-        if(policy==4){auto globals=pointer(base_+0x32c0670);if(!globals||!read(globals+68,tick))return result;}
+        if(policy==4){auto globals=pointer(base_+profile_.addresses.global_vars);if(!globals||!read(globals+68,tick))return result;}
         if(!read(prop+version_offset,version_after)||!read(prop+cache_offset+48*speed_index,again)||cache!=again
             ||!valid_modifier_cache(cache[0],cache[2],version_before,version_after,policy,cache[3],tick,dirty,cache[4],bonus,cache[1]))return result;
         result.bonus_percent=cache[4]?bonus:0;
     }
-    if(!read(prop+version_offset,version_after)||version_before!=version_after||pointer(pawn.address+0x348)!=prop
-        ||pointer(ability.address+0x390)!=vdata||pointer(vdata+384)!=array||entity(chunks,handle).address!=ability.address
+    if(!read(prop+version_offset,version_after)||version_before!=version_after||pointer(pawn.address+profile_.fields.modifier_property)!=prop
+        ||pointer(ability.address+0x390)!=vdata||pointer(vdata+profile_.fields.weapon_map+16)!=array||entity(chunks,handle).address!=ability.address
         ||entity(chunks,pawn.handle).address!=pawn.address)return result;
     std::array<unsigned char,72> map_after{};if(!read(component+24,map_after)||map_after!=map)return result;
     uint32_t current_handle{};if(!read(slot_address+4,current_handle)||current_handle!=handle)return result;
@@ -588,27 +573,27 @@ Snapshot GameReader::sample(ReadOptions options) {
     Snapshot result;
     if (process_ && WaitForSingleObject(process_,0)!=WAIT_TIMEOUT) {detach();status_="Waiting for Deadlock";next_attach_=0;}
     if (!process_ && !attach()) {result.status=status_;return result;}
-    result.pid=pid_;result.status=status_;
-    auto rules=pointer(base_+0x3c7aee0);std::array<int,2> modes{};
-    if(rules&&pointer(rules)==base_+0x26be898&&read(rules+0xa8,modes)&&pointer(base_+0x3c7aee0)==rules) {
+    result.pid=pid_;result.status=status_;result.reader_profile=profile_.source;
+    auto rules=pointer(base_+profile_.addresses.game_rules);std::array<int,2> modes{};
+    if(rules&&pointer(rules)==base_+profile_.addresses.rules_vtable&&read(rules+profile_.fields.match_mode,modes)&&pointer(base_+profile_.addresses.game_rules)==rules) {
         result.match_mode=modes[0];result.game_mode=modes[1];
         // Verified mode enum: game 3=Sandbox; match 3=CoopBot.
         result.practice=(modes[1]==3||modes[0]==3);
-        auto testing=pointer(base_+0x36cddc0);uint8_t hero_testing{};
+        auto testing=pointer(base_+profile_.addresses.hero_testing);uint8_t hero_testing{};
         // The game's sandbox predicate also accepts its server testing convar.
         if((modes[0]==0||modes[0]==2)&&testing&&read(testing+88,hero_testing)&&hero_testing==1)result.practice=true;
     }
     if(engine_base_) {
         // Source2EngineToClient001 GetLevelName reads this connected-client state.
-        auto connection=pointer(engine_base_+0x8b2db0);int state{};
+        auto connection=pointer(engine_base_+profile_.addresses.engine_connection);int state{};
         if(connection&&read(connection+560,state)&&state>=2) {
             auto name=pointer(connection+536);
             if(name)result.level_name=text(name,96);
         }
-        auto demo=pointer(engine_base_+0x5b92b0);uint8_t playing{};
+        auto demo=pointer(engine_base_+profile_.addresses.engine_demo);uint8_t playing{};
         // CDemoPlayer slot 11 is the playback predicate used by engine demo commands.
-        if(demo&&pointer(demo)==engine_base_+0x4d7e88&&read(demo+0x1230,playing)&&playing==1
-            &&pointer(engine_base_+0x5b92b0)==demo)result.replay=true;
+        if(demo&&pointer(demo)==engine_base_+profile_.addresses.demo_vtable&&read(demo+0x1230,playing)&&playing==1
+            &&pointer(engine_base_+profile_.addresses.engine_demo)==demo)result.replay=true;
     }
     if(visibility_map_key(result.level_name)=="start") {
         result.map_name=loaded_arena(GetTickCount64());result.map_source="loaded_arena_world";
@@ -649,55 +634,52 @@ Snapshot GameReader::sample(ReadOptions options) {
         };
         auto current=entity(chunks,controller.handle);
         if (current.address!=controller.address) {++result.invalid_handles;next_enumerate_=0;skip("Controller identity changed");continue;}
-        std::array<unsigned char,0xd5> controller_fields{};
-        if(!read(controller.address+0x6bc,controller_fields)){skip("Cannot read controller fields");continue;}
-        std::memcpy(&handle,controller_fields.data(),4);
+        const auto& f=profile_.fields;
+        auto controller_first=std::min(f.pawn_handle,f.local_controller),controller_last=std::max(f.pawn_handle+4,f.local_controller+1);
+        std::array<unsigned char,4096> controller_fields;
+        if(controller_last-controller_first>controller_fields.size()||!read(controller.address+controller_first,controller_fields.data(),controller_last-controller_first)){skip("Cannot read controller fields");continue;}
+        std::memcpy(&handle,controller_fields.data()+f.pawn_handle-controller_first,4);
         auto pawn=entity(chunks,handle);if (!pawn.address) {++result.invalid_handles;skip("Controller has no valid pawn");continue;}
-        if(controller_fields[0xd4]) {
+        if(controller_fields[f.local_controller-controller_first]) {
             result.hero=hero_profile(chunks,pawn);
             result.weapon=weapon_profile(chunks,pawn);
             uint8_t team{};
-            if(read(pawn.address+0x3ef,team)&&entity(chunks,handle).address==pawn.address)result.local_team=team;
-            Player local;auto scene=pointer(pawn.address+0x330);
+            if(read(pawn.address+profile_.fields.team,team)&&entity(chunks,handle).address==pawn.address)result.local_team=team;
+            Player local;auto scene=pointer(pawn.address+profile_.fields.scene_node);
             if(local_handle_!=handle){local_motion_={};local_handle_=handle;}
             if(scene&&anchor(scene,local)&&local.dot_valid[2]&&entity(chunks,handle).address==pawn.address){
                 local_motion_.update(local.dots[2],now);result.local_velocity=local_motion_.velocity;result.local_velocity_valid=local_motion_.valid;
             }else local_motion_={};
             uint32_t current_handle{};
-            if(!read(controller.address+0x6bc,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.local_velocity_valid=false;local_motion_={};}
+            if(!read(controller.address+profile_.fields.pawn_handle,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.local_velocity_valid=false;local_motion_={};}
             skip("Local player");
             continue;
         }
         auto pawn_type=type(pawn.address);
         if (pawn_type.find("CitadelPlayerPawn")==std::string::npos) {skip(pawn_type.empty()?"Pawn type unavailable":"Unsupported pawn type: "+pawn_type);continue;}
-        std::array<unsigned char,0xc0> fields{};
-        if (!read(pawn.address+0x330,fields)) {skip("Cannot read pawn fields");continue;}
-        uintptr_t scene{}; Player p; p.handle=handle;
-        std::memcpy(&scene,fields.data(),8);std::memcpy(&p.maximum,fields.data()+0x20,4);std::memcpy(&p.health,fields.data()+0x24,4);
-        p.team=fields[0xbf];uint8_t dormant{};
-        if(fields[0x2c]||p.health<=0){skip("Dead player");continue;}
+        uintptr_t scene{}; Player p; p.handle=handle;uint8_t life{},dormant{};
+        if(!pawn_fields(pawn.address,p,scene,life)){skip("Cannot read pawn fields");continue;}
+        if(life||p.health<=0){skip("Dead player");continue;}
         if(p.maximum<=0){skip("Invalid maximum health");continue;}
         if(!scene){skip("Scene unavailable");continue;}
-        if(!read(scene+0x103,dormant)){skip("Cannot read scene state");continue;}
+        if(!read(scene+profile_.fields.dormant,dormant)){skip("Cannot read scene state");continue;}
         if(dormant){skip("Dormant player");continue;}
         uint32_t disabled_groups{};
-        bool hitboxes=options.hitboxes&&read(pawn.address+0xb98,disabled_groups);
+        bool hitboxes=options.hitboxes&&read(pawn.address+profile_.fields.disabled_groups,disabled_groups);
         if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups)) {++result.missing_anchors;skip(p.anchor_status,p.model_name);continue;}
-        if(hitboxes){uint32_t after{};if(!read(pawn.address+0xb98,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
+        if(hitboxes){uint32_t after{};if(!read(pawn.address+profile_.fields.disabled_groups,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
         if (entity(chunks,handle).address!=pawn.address) {skip("Pawn identity changed",p.model_name);continue;}
         if(p.dot_valid[2]&&(velocities_.size()<512||velocities_.contains(handle))){auto& estimate=velocities_[handle];estimate.update(p.dots[2],now);p.velocity=estimate.velocity;p.velocity_valid=estimate.valid;}
         result.players.push_back(std::move(p));
     }
     for(const auto& object:extras_) {
         if(entity(chunks,object.handle).address!=object.address)continue;
-        std::array<unsigned char,0xc0> fields{};uintptr_t scene{};uint8_t dormant{};
-        if(!read(object.address+0x330,fields))continue;
-        std::memcpy(&scene,fields.data(),8);
-        if(!scene||fields[0x2c]||!read(scene+0x103,dormant)||dormant)continue;
-        FocusTarget target;target.handle=object.handle;target.kind=object.kind;target.team=fields[0xbf];
-        std::memcpy(&target.health,fields.data()+0x24,4);std::memcpy(&target.maximum,fields.data()+0x20,4);
+        uintptr_t scene{};uint8_t life{},dormant{};
+        FocusTarget target;target.handle=object.handle;target.kind=object.kind;
+        if(!pawn_fields(object.address,target,scene,life))continue;
+        if(!scene||life||!read(scene+profile_.fields.dormant,dormant)||dormant)continue;
         if(object.kind==TargetKind::Minion&&(target.health<=0||target.maximum<=0))continue;
-        if(!extra_anchor(object,scene,target)||entity(chunks,object.handle).address!=object.address||pointer(object.address+0x330)!=scene)continue;
+        if(!extra_anchor(object,scene,target)||entity(chunks,object.handle).address!=object.address||pointer(object.address+profile_.fields.scene_node)!=scene)continue;
         if(velocities_.size()<512||velocities_.contains(object.handle)) {
             auto& estimate=velocities_[object.handle];estimate.update(target.dots[1],now);
             target.velocity=estimate.velocity;target.velocity_valid=estimate.valid;

@@ -3,8 +3,8 @@ using System.Text.RegularExpressions;
 sealed record SchemaValidation(string ClientSha256, string EngineSha256, int Fields, bool ReaderCompatible, string[] Differences);
 
 static class ReaderSupport {
-    // This whitelist describes the manually validated reader, not every layout in a generated SDK.
-    // Unknown binary hashes remain unsupported even when these schema fields match.
+    // Baseline comparison for dump reports and the compiled fallback reader.
+    // New builds are accepted by ReaderProfiles after code and live validation.
     public const string ClientHash = "B48636D0282A3F6916725E1701C0454738BB5A4903E83FC96A27B01DCE800D23";
     public const string EngineHash = "084C45473667C65174A9A19C428359AC335C3E990008DBF26C0EEF91BE44784C";
     public static readonly (string Class, string Field, uint Offset)[] Required = [
@@ -54,8 +54,8 @@ static class ReaderSupport {
             if (!offsets.TryGetValue(name, out var value)) differences.Add(name + " is missing");
             else if (value != expected.Offset) differences.Add($"{name}: expected 0x{expected.Offset:X}, got 0x{value:X}");
         }
-        if (!client.Equals(ClientHash, StringComparison.OrdinalIgnoreCase)) differences.Add("New client.dll hash: code signatures, globals and private layouts require review.");
-        if (!engine.Equals(EngineHash, StringComparison.OrdinalIgnoreCase)) differences.Add("New engine2.dll hash: replay/map reader addresses require review.");
+        if (!client.Equals(ClientHash, StringComparison.OrdinalIgnoreCase)) differences.Add("New client.dll hash: generated reader profile required.");
+        if (!engine.Equals(EngineHash, StringComparison.OrdinalIgnoreCase)) differences.Add("New engine2.dll hash: generated reader profile required.");
         return new(client, engine, fields, differences.Count == 0, differences.ToArray());
     }
 }

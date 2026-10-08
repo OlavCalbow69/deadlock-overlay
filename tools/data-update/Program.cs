@@ -9,7 +9,7 @@ using Microsoft.Win32;
 
 if (args.Contains("--self-test")) return UpdateTests.Run();
 var options = Options.Parse(args);
-if (options is null) { Console.Error.WriteLine("Usage: DeadlockDataUpdate --mode maps|schema|all --root <exe-directory> --job <job-directory> [--project <project-directory>] [--parent <pid>] [--maps <map-directory>]"); return 2; }
+if (options is null) { Console.Error.WriteLine("Usage: DeadlockDataUpdate --mode maps|schema|all|profile --root <exe-directory> --job <job-directory> [--project <project-directory>] [--parent <pid>] [--maps <map-directory>]"); return 2; }
 using var cancellation = new CancellationTokenSource();
 using var monitorStop = new CancellationTokenSource();
 var updater = new DataUpdater(options, cancellation.Token);
@@ -34,7 +34,7 @@ sealed record Options(string Mode, string Root, string Project, string Job, int 
         for (int i = 0; i < args.Length; i += 2) {
             if (i + 1 >= args.Length || !args[i].StartsWith("--") || !values.TryAdd(args[i], args[i + 1])) return null;
         }
-        if (!values.TryGetValue("--mode", out var mode) || mode is not ("maps" or "schema" or "all") ||
+        if (!values.TryGetValue("--mode", out var mode) || mode is not ("maps" or "schema" or "all" or "profile") ||
             !values.TryGetValue("--root", out var root) || !values.TryGetValue("--job", out var job)) return null;
         int parent = 0;
         if (values.TryGetValue("--parent", out var p) && (!int.TryParse(p, out parent) || parent < 0)) return null;
@@ -61,7 +61,11 @@ static class Files {
         var temp = destination + ".tmp";
         File.Copy(source, temp, true);
         if (Hash(source) != Hash(temp)) throw new IOException("Copy verification failed: " + destination);
-        File.Move(temp, destination, true);
+        for (int attempt = 0; ; attempt++) {
+            try { File.Move(temp, destination, true); break; }
+            catch (IOException) when (attempt < 5) { Thread.Sleep(20); }
+            catch (UnauthorizedAccessException) when (attempt < 5) { Thread.Sleep(20); }
+        }
     }
     public static bool Within(string path, string parent) => Path.GetFullPath(path).StartsWith(Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     public static void DeleteTree(string path, string parent) {
@@ -123,6 +127,7 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
     readonly List<string> notes = [];
     int mapUpdated, mapCurrent, mapSkipped, mapFailed;
     bool dumpReady, readerReady, completedMaps;
+    string readerIssue = "";
     string schemaDirectory = "";
     int progress;
     string Project => File.Exists(Path.Combine(options.Project, "CMakeLists.txt")) ? options.Project : options.Root;
@@ -158,15 +163,21 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
                     return 1;
                 }
             }
+            if (options.Mode == "profile") {
+                schemaDirectory = Path.Combine(Project, "data", "schema-dump", "deadlock");
+                dumpReady = Directory.Exists(schemaDirectory);
+                var game = Directory.GetParent(maps)?.Parent?.FullName ?? throw new IOException("Invalid game directory");
+                await UpdateReaderProfile(game);
+            }
             cancellation.ThrowIfCancellationRequested();
             string message = options.Mode == "maps" ? $"Maps ready: {mapUpdated} installed, {mapCurrent} current, {mapSkipped} without physics."
-                : !readerReady ? "Data saved. This client patch still needs a reader profile review."
-                : "Game data ready. Maps and schema match the supported reader.";
-            if (options.Mode == "schema" && readerReady) message = "Fresh schema saved. Client matches the supported reader.";
+                : !readerReady ? "Data saved. Reader profile not installed: " + readerIssue
+                : "Game data and reader profile updated. Reader reloads automatically.";
+            if (options.Mode == "schema" && readerReady) message = "Schema and reader profile updated. Reader reloads automatically.";
             if (mapFailed > 0) message += $" {mapFailed} map export(s) failed; see report.";
             Log(message);
             Status(mapFailed > 0 || (options.Mode != "maps" && !readerReady) ? "warnings" : "complete", "Finished", message, 100);
-            return mapFailed > 0 ? 1 : 0;
+            return mapFailed > 0 || (options.Mode != "maps" && !readerReady) ? 1 : 0;
         } catch (OperationCanceledException) { Log("Update cancelled; previously published data retained."); Status("cancelled", "Cancelled", "Update cancelled. Successfully installed maps are retained.", progress); return 3; }
         catch (Exception e) { Log(e.ToString()); Status("failed", "Update failed", e.Message, progress); return 1; }
         finally { ownership.Release(); }
@@ -274,12 +285,29 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
             var validation = ReaderSupport.Validate(staged, clientHash, engineHash);
             if (Files.Hash(client) != clientHash || Files.Hash(engine) != engineHash) throw new InvalidDataException("The game binaries changed during the dump. Try again after the game update finishes.");
             Files.AtomicText(Path.Combine(staged, "overlay-validation.json"), JsonSerializer.Serialize(validation, new JsonSerializerOptions { WriteIndented = true }));
-            Log($"Schema fields: {validation.Fields}; reader compatible: {validation.ReaderCompatible}; client SHA256: {clientHash}");
-            foreach (var difference in validation.Differences) Log("Layout review: " + difference);
+            Log($"Schema fields: {validation.Fields}; client SHA256: {clientHash}");
             cancellation.ThrowIfCancellationRequested();
             Files.PublishDirectory(staged, schemaDirectory);
-            dumpReady = true; readerReady = validation.ReaderCompatible;
+            dumpReady = true;
             Log("Schema saved: " + schemaDirectory + "; previous version retained in deadlock.previous.");
+            await UpdateReaderProfile(game);
         } finally { Files.DeleteTree(staged, parent); }
+    }
+    async Task UpdateReaderProfile(string game) {
+            try {
+                var client = Path.Combine(game, "citadel", "bin", "win64", "client.dll");
+                var engine = Path.Combine(game, "bin", "win64", "engine2.dll");
+                var world = Path.Combine(game, "bin", "win64", "worldrenderer.dll");
+                var validation = JsonSerializer.Deserialize<SchemaValidation>(File.ReadAllText(Path.Combine(schemaDirectory, "overlay-validation.json"))) ?? throw new InvalidDataException("Missing schema validation");
+                Status("running", "Resolving reader profile", "Reading new field offsets, globals and private-layout witnesses...", 94);
+                var candidate = ReaderProfiles.Create(schemaDirectory, client, engine, world, options.Job, Log, cancellation);
+                Status("running", "Validating reader profile", "Checking projection, entities, bones and hitboxes in the running game...", 97);
+                await ReaderProfiles.Verify(candidate, options.Root, options.Job, Log, cancellation);
+                if (Files.Hash(client) != candidate.ClientHash || Files.Hash(engine) != candidate.EngineHash || Files.Hash(world) != candidate.WorldHash) throw new InvalidDataException("DLLs changed before profile publication");
+                cancellation.ThrowIfCancellationRequested();
+                ReaderProfiles.Publish(candidate, options.Root, Project, Log);readerReady = true;
+                Files.AtomicText(Path.Combine(schemaDirectory, "overlay-validation.json"), JsonSerializer.Serialize(validation with { ReaderCompatible = true, Differences = [] }, new JsonSerializerOptions { WriteIndented = true }));
+            } catch (OperationCanceledException) { throw; }
+            catch (Exception e) { readerReady = false;readerIssue = e.Message;Log("Reader profile not installed: " + e.Message); }
     }
 }

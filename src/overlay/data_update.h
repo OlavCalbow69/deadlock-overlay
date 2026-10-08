@@ -37,7 +37,7 @@ class DataUpdate {
         }
     }
 public:
-    std::string state="idle",phase="Game data",message="Install maps or refresh maps and schema together.";
+    std::string state="idle",phase="Game data",message="Update maps, schema and the reader profile.";
     int progress{};
     DWORD exit_code{};
     bool running()const{return process_!=nullptr;}
@@ -60,7 +60,7 @@ public:
         SHELLEXECUTEINFOW info{sizeof(info)};info.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_FLAG_NO_UI;
         info.hwnd=owner;info.lpVerb=elevated?L"runas":L"open";info.lpFile=tool.c_str();info.lpParameters=arguments.c_str();info.nShow=SW_HIDE;
         if(!ShellExecuteExW(&info)||!info.hProcess){auto error=GetLastError();state="failed";phase="Update not started";message=error==ERROR_CANCELLED?"Windows administrator approval was cancelled.":"Could not start the updater (Windows error "+std::to_string(error)+").";return false;}
-        process_=info.hProcess;state="running";phase="Starting update";message=elevated?"Preparing maps and schema tools...":"Discovering installed maps...";progress=0;next_poll_=0;finished_=false;return true;
+        process_=info.hProcess;state="running";phase="Starting update";message=elevated?"Preparing game data tools...":"Discovering installed maps...";progress=0;next_poll_=0;finished_=false;return true;
     }
     void poll() {
         if(!process_)return;

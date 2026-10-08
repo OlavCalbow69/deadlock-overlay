@@ -5,6 +5,7 @@
 #include "hero_profile.h"
 #include "visibility.h"
 #include "hitboxes.h"
+#include "reader_profile.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -67,13 +68,17 @@ struct Snapshot {
     double sample_us{};
     uint64_t read_calls{};
     std::string status{"Waiting for Deadlock"};
+    std::string reader_profile;
 };
 class GameReader {
 public:
+    explicit GameReader(std::filesystem::path profile_file={}):profile_file_(std::move(profile_file)){}
     ~GameReader();
     Snapshot sample(ReadOptions options={});
     void refresh_data(){detach();next_attach_=0;}
 private:
+    ReaderProfile profile_;
+    std::filesystem::path profile_file_;
     HANDLE process_{};
     DWORD pid_{};
     uintptr_t base_{}, entity_slot_{}, matrix_address_{};
@@ -120,6 +125,7 @@ private:
     std::string type(uintptr_t entity);
     bool attach();
     bool read_projection(Snapshot& result) const;
+    bool pawn_fields(uintptr_t address,FocusTarget& target,uintptr_t& scene,uint8_t& life) const;
     void detach();
     void clear_map_cache();
     std::string loaded_arena(uint64_t now);

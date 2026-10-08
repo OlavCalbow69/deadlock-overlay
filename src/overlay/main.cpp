@@ -149,7 +149,7 @@ void visibility_report(const Snapshot& s,const std::filesystem::path& path,bool 
 void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool visible=false,LONG_PTR style=0,HWND overlay_window=nullptr,bool settings_visible=false,double target_hz=0,double render_fps=0,int drawn_hitboxes=0) {
     DWORD foreground_pid{};GetWindowThreadProcessId(GetForegroundWindow(),&foreground_pid);
     RECT bounds{};if(overlay_window)GetWindowRect(overlay_window,&bounds);
-    std::ofstream out(path);out<<"{\n\"pid\":"<<s.pid<<",\"status\":\""<<escaped(s.status)<<"\",\"sample_time\":"<<s.time
+    std::ofstream out(path);out<<"{\n\"pid\":"<<s.pid<<",\"status\":\""<<escaped(s.status)<<"\",\"reader_profile\":\""<<escaped(s.reader_profile)<<"\",\"sample_time\":"<<s.time
         <<",\"map\":\""<<escaped(s.map_name)<<"\",\"level\":\""<<escaped(s.level_name)<<"\",\"map_source\":\""<<escaped(s.map_source)<<"\",\"visibility_status\":\""<<escaped(s.visibility_status)<<"\",\"triangles\":"<<(s.visibility?s.visibility->triangle_count():0)
         <<",\"controllers\":"<<s.controllers<<",\"local_team\":"<<unsigned(s.local_team)<<",\"invalid_handles\":"<<s.invalid_handles<<",\"missing_anchors\":"<<s.missing_anchors
         <<",\"drawn_bars\":"<<bars<<",\"overlay_visible\":"<<(visible?"true":"false")<<",\"overlay_extended_style\":"<<style
@@ -1010,7 +1010,7 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         };
         auto buttons=updates.Min+px(20,44);
         if(action("update_all","Update all data",buttons,148,updater.running()))updater.start(L"all",app.settings_window.hwnd);
-        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Install new/changed maps and create a fresh schema + SDK dump.\nDeadlock must be open. Windows asks for administrator approval.\nA new binary patch may still require a reader profile review.");
+        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Refresh maps, dump schema and resolve a new reader profile.\nLoad sandbox, bots or replay with a nearby player for live validation.\nThe reader reloads after a successful update. Changed private layouts may need review.");
         if(action("install_maps","Install all maps",buttons+px(160,0),148,updater.running()))updater.start(L"maps",app.settings_window.hwnd);
         if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Discover installed map VPKs, verify current meshes and export new/changed maps.\nNo administrator approval or overlay rebuild needed.");
         if(action("dump_schema","Dump schema",buttons+px(320,0),128,updater.running()))updater.start(L"schema",app.settings_window.hwnd);
@@ -1022,7 +1022,7 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         if(updater.running()) {
             ImGui::SetCursorScreenPos(updates.Min+px(20,118));
             ImGui::ProgressBar(float(updater.progress)/100.f,{updates.GetWidth()-px(40),px(18)},updater.phase.c_str());
-        } else text(updates.Min+px(20,122),"Maps reload automatically. Reports include schema compatibility checks.",true,12);
+        } else text(updates.Min+px(20,122),"Maps and reader reload automatically. Reports include validation details.",true,12);
         dl->PopClipRect();
     }
     if(changed)save(app.settings);ImGui::PopStyleColor();ui_runtime::pop_font();
@@ -1418,6 +1418,25 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
 }
 }
 int main(int argc,char** argv) {
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--validate-profile") {
+        auto candidate=std::filesystem::path(argv[i+1]);auto result=candidate.parent_path()/L"profile-live-validation.json";
+        for(int j=1;j+1<argc;++j)if(std::string(argv[j])=="--profile-result")result=std::filesystem::path(argv[j+1]);
+        overlay::GameReader game(candidate);overlay::Snapshot s;bool passed=false;
+        for(int attempt=0;attempt<8;++attempt) {
+            s=game.sample({true,true,true,true});
+            bool live_geometry=std::any_of(s.players.begin(),s.players.end(),[](const auto& p){return p.dot_valid[0]&&p.dot_valid[1]&&p.dot_valid[2]&&!p.skeleton.empty()&&!p.hitboxes.empty();});
+            bool local=std::any_of(s.skipped_players.begin(),s.skipped_players.end(),[](const auto& p){return p.reason=="Local player";});
+            passed=s.time&&s.projection.valid&&s.camera_valid&&s.controllers>0&&!s.missing_anchors&&live_geometry
+                &&(!local||s.hero.valid)&&(!local||s.replay||s.weapon.base_speed>=1000.f);
+            if(passed)break;
+            if(attempt<7)Sleep(200);
+        }
+        std::string message=passed?"Reader profile passed live validation":s.status;
+        if(!passed&&s.status.starts_with("Connected"))message=s.players.empty()?"Load sandbox, bots or replay with a live remote player, then update again":s.missing_anchors?"Live bone reads failed; reader profile needs review":!s.hero.valid?"Live hero metadata did not validate":"Live hitbox or weapon data did not validate";
+        std::ofstream out(result);out<<"{\"passed\":"<<(passed?"true":"false")<<",\"message\":\""<<overlay::escaped(message)<<"\",\"pid\":"<<s.pid<<",\"reader_profile\":\""<<overlay::escaped(s.reader_profile)<<"\",\"controllers\":"<<s.controllers<<",\"players\":"<<s.players.size()<<",\"missing_anchors\":"<<s.missing_anchors<<",\"hero_valid\":"<<(s.hero.valid?"true":"false")<<",\"weapon_valid\":"<<(s.weapon.valid?"true":"false")<<"}\n";
+        overlay::report(s,result.parent_path()/L"profile-probe.json");
+        return passed&&out.good()?0:2;
+    }
     for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--update-data") {
         std::string mode=argv[i+1];if(mode!="maps"&&mode!="schema"&&mode!="all")return 2;
         overlay::DataUpdate updater;updater.initialize(overlay::executable_directory());

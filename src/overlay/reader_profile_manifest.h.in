@@ -1,0 +1,2 @@
+#pragma once
+namespace overlay { inline constexpr char reader_manifest_id[]="@READER_MANIFEST_ID@"; }
