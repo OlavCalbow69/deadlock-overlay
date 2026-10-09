@@ -15,7 +15,10 @@ static class ReaderProfiles {
     sealed record Vtable(string Key, string Module, string Type);
     sealed record Witness(string Key, string Module, string Pattern);
     sealed record Vfunc(string Key, string Module, string Vtable, int Slot, string Pattern);
-    sealed record Manifest(int Version, string Layout, Symbol[] Symbols, Vtable[] Vtables, Witness[] Witnesses, Vfunc[] Vfuncs);
+    sealed record Operand(int Offset, int Addend);
+    sealed record LayoutValue(string Key, string Witness, Operand[] Operands, int Minimum, int Maximum, int Alignment);
+    sealed record EnumValue(string Key, string Name);
+    sealed record Manifest(int Version, string Layout, Symbol[] Symbols, Vtable[] Vtables, Witness[] Witnesses, Vfunc[] Vfuncs, LayoutValue[] Values, EnumValue[] Enums);
     static string Resource(string name) {
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name) ?? throw new InvalidDataException("Missing profile resolver resource: " + name);
         using var reader = new StreamReader(stream); return reader.ReadToEnd().Replace("\r\n", "\n");
@@ -27,7 +30,7 @@ static class ReaderProfiles {
         if (validation.ClientSha256 != clientHash || validation.EngineSha256 != engineHash) throw new InvalidDataException("Schema dump belongs to a different DLL build. Run Dump schema first.");
         string contract = Resource("ReaderContract"), signatures = Resource("ReaderSignatures");
         var manifest = JsonSerializer.Deserialize<Manifest>(signatures, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidDataException("Invalid resolver manifest");
-        if (manifest.Version != 1 || manifest.Layout != "source2-6759-v1") throw new InvalidDataException("Unsupported resolver version");
+        if (manifest.Version != 2 || manifest.Layout != "source2-reader-v2") throw new InvalidDataException("Unsupported resolver version");
         string manifestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contract + signatures))).ToLowerInvariant();
         var offsets = new Dictionary<string, uint>();var representations = new Dictionary<string,(string Type,uint Width)>(); string cls = "";
         foreach (var line in File.ReadLines(Path.Combine(dump, "sdk", "client", "_offsets.hpp"))) {
@@ -74,10 +77,30 @@ static class ReaderProfiles {
             cancel.ThrowIfCancellationRequested(); uint address = images[table.Module].Vtable(table.Type);
             values.Add("address." + table.Key, address); log($"Validated {table.Module}.{table.Key}: 0x{address:X}");
         }
+        var witnessLocations = new Dictionary<string, (PeImage Image, uint Address, string[] Pattern)>();
         foreach (var witness in manifest.Witnesses) {
             cancel.ThrowIfCancellationRequested(); var matches = images[witness.Module].Matches(witness.Pattern);
             if (matches.Length != 1) throw new InvalidDataException($"Private layout {witness.Key}: expected one unchanged code witness, found {matches.Length}; reader review required");
+            witnessLocations.Add(witness.Key, (images[witness.Module], matches[0], witness.Pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries)));
             log($"Private layout {witness.Key}: verified at 0x{matches[0]:X}");
+        }
+        foreach (var item in manifest.Values) {
+            cancel.ThrowIfCancellationRequested();
+            var witness = witnessLocations[item.Witness]; var resolved = new HashSet<uint>();
+            if (item.Alignment <= 0 || item.Operands.Length == 0) throw new InvalidDataException("Invalid private value recipe");
+            foreach (var operand in item.Operands) {
+                if (operand.Offset < 0 || operand.Offset + 4 > witness.Pattern.Length || witness.Pattern.Skip(operand.Offset).Take(4).Any(token => token != "?"))
+                    throw new InvalidDataException("Private value operand is not a declared displacement");
+                long value = (long)BinaryPrimitives.ReadInt32LittleEndian(witness.Image.At(witness.Address + (uint)operand.Offset, 4)) - operand.Addend;
+                if (value < item.Minimum || value >= item.Maximum || value % item.Alignment != 0) throw new InvalidDataException("Private value outside supported bounds: " + item.Key);
+                resolved.Add((uint)value);
+            }
+            if (resolved.Count != 1) throw new InvalidDataException("Private layout operands disagree: " + item.Key);
+            uint result = resolved.Single(); values.Add("private." + item.Key, result); log($"Resolved private.{item.Key}: 0x{result:X}");
+        }
+        foreach (var item in manifest.Enums) {
+            cancel.ThrowIfCancellationRequested();uint value = images["client"].ModifierValue(item.Name);
+            values.Add("private." + item.Key, value);log($"Resolved {item.Name}: {value}");
         }
         foreach (var witness in manifest.Vfuncs) {
             cancel.ThrowIfCancellationRequested();var image = images[witness.Module];
@@ -87,8 +110,9 @@ static class ReaderProfiles {
         }
         // Every address in the C++ contract must be generated; no missing value may fall back to an old RVA.
         foreach (Match a in Regex.Matches(contract, "PROFILE_ADDRESS\\((\\w+),")) if (!values.ContainsKey("address." + a.Groups[1].Value)) throw new InvalidDataException("Unresolved address: " + a.Groups[1].Value);
+        foreach (Match a in Regex.Matches(contract, "PROFILE_VALUE\\((\\w+),")) if (!values.ContainsKey("private." + a.Groups[1].Value)) throw new InvalidDataException("Unresolved private value: " + a.Groups[1].Value);
         if (Files.Hash(client) != clientHash || Files.Hash(engine) != engineHash || Files.Hash(world) != worldHash) throw new InvalidDataException("DLLs changed while resolving the profile");
-        var content = new StringBuilder().AppendLine("format=1").AppendLine("layout=" + manifest.Layout).AppendLine("manifest=" + manifestHash)
+        var content = new StringBuilder().AppendLine("format=2").AppendLine("layout=" + manifest.Layout).AppendLine("manifest=" + manifestHash)
             .AppendLine("validation=passed").AppendLine("client_hash=" + clientHash.ToLowerInvariant()).AppendLine("engine_hash=" + engineHash.ToLowerInvariant()).AppendLine("world_hash=" + worldHash.ToLowerInvariant());
         foreach (var pair in values.OrderBy(p => p.Key, StringComparer.Ordinal)) content.AppendLine(pair.Key + "=0x" + pair.Value.ToString("X", CultureInfo.InvariantCulture));
         var path = Path.Combine(job, "candidate-reader-profile.ini"); Files.AtomicText(path, content.ToString());

@@ -41,7 +41,7 @@ Visible only defaults on. Static map collision segments determine which players/
 
 Live matches can report `start` as their bootstrap level. Visibility resolves the actual loaded arena through `worldrenderer.dll` before selecting its collision mesh.
 
-Settings persist in `%LOCALAPPDATA%/DeadlockOverlay/settings.ini`. The external reader uses ReadProcessMemory and loads validated profiles for the installed DLL build. Automatic resolution has been verified on build **6763**; the previously verified **6759** profile remains a compiled fallback. Use windowed/borderless mode. See [automatic reader profiles](docs/GAME_DATA_UPDATES.md) and the [6759 baseline](docs/BUILD_6759.md).
+Settings persist in `%LOCALAPPDATA%/DeadlockOverlay/settings.ini`. The external reader uses ReadProcessMemory and loads validated profiles for the installed DLL build. Automatic resolution has been verified on builds **6763** and **6766**; the previously verified **6759** profile remains a compiled fallback. Modifier-cache placement and bullet-speed modifier IDs are resolved from the installed DLL. Use windowed/borderless mode. See [automatic reader profiles](docs/GAME_DATA_UPDATES.md) and the [6759 baseline](docs/BUILD_6759.md).
 
 Compatible patches can update through the GUI. Changed signatures or private layouts still require updating the resolver or reader, and the update report identifies the failed check.
 

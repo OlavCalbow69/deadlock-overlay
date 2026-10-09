@@ -1433,7 +1433,7 @@ int main(int argc,char** argv) {
         }
         std::string message=passed?"Reader profile passed live validation":s.status;
         if(!passed&&s.status.starts_with("Connected"))message=s.players.empty()?"Load sandbox, bots or replay with a live remote player, then update again":s.missing_anchors?"Live bone reads failed; reader profile needs review":!s.hero.valid?"Live hero metadata did not validate":"Live hitbox or weapon data did not validate";
-        std::ofstream out(result);out<<"{\"passed\":"<<(passed?"true":"false")<<",\"message\":\""<<overlay::escaped(message)<<"\",\"pid\":"<<s.pid<<",\"reader_profile\":\""<<overlay::escaped(s.reader_profile)<<"\",\"controllers\":"<<s.controllers<<",\"players\":"<<s.players.size()<<",\"missing_anchors\":"<<s.missing_anchors<<",\"hero_valid\":"<<(s.hero.valid?"true":"false")<<",\"weapon_valid\":"<<(s.weapon.valid?"true":"false")<<"}\n";
+        std::ofstream out(result);out<<"{\"passed\":"<<(passed?"true":"false")<<",\"message\":\""<<overlay::escaped(message)<<"\",\"pid\":"<<s.pid<<",\"reader_profile\":\""<<overlay::escaped(s.reader_profile)<<"\",\"controllers\":"<<s.controllers<<",\"players\":"<<s.players.size()<<",\"missing_anchors\":"<<s.missing_anchors<<",\"hero_valid\":"<<(s.hero.valid?"true":"false")<<",\"weapon_valid\":"<<(s.weapon.valid?"true":"false")<<",\"weapon_base_speed\":"<<s.weapon.base_speed<<",\"weapon_status\":\""<<overlay::escaped(s.weapon.status)<<"\"}\n";
         overlay::report(s,result.parent_path()/L"profile-probe.json");
         return passed&&out.good()?0:2;
     }

@@ -15,17 +15,30 @@ struct ReaderProfile {
     struct Fields {
 #define PROFILE_FIELD(key,value,cls,field) uint32_t key=value;
 #define PROFILE_ADDRESS(key,value,module)
+#define PROFILE_VALUE(key,value)
 #include "reader_profile_values.inc"
 #undef PROFILE_FIELD
 #undef PROFILE_ADDRESS
+#undef PROFILE_VALUE
     } fields;
     struct Addresses {
 #define PROFILE_FIELD(key,value,cls,field)
 #define PROFILE_ADDRESS(key,value,module) uint32_t key=value;
+#define PROFILE_VALUE(key,value)
 #include "reader_profile_values.inc"
 #undef PROFILE_FIELD
 #undef PROFILE_ADDRESS
+#undef PROFILE_VALUE
     } addresses;
+    struct Layout {
+#define PROFILE_FIELD(key,value,cls,field)
+#define PROFILE_ADDRESS(key,value,module)
+#define PROFILE_VALUE(key,value) uint32_t key=value;
+#include "reader_profile_values.inc"
+#undef PROFILE_FIELD
+#undef PROFILE_ADDRESS
+#undef PROFILE_VALUE
+    } layout;
     bool automatic{};
     std::string source{"built_in_6759"};
     static constexpr const char* client_hash="b48636d0282a3f6916725e1701c0454738bb5a4903e83fc96a27b01dce800d23";
@@ -46,7 +59,7 @@ struct ReaderProfile {
         }
         if(!input.eof())return fail("Cannot read complete reader profile");
         auto equal=[&](const char* key,const std::string& expected){auto it=values.find(key);return it!=values.end()&&it->second==expected;};
-        if(!equal("format","1")||!equal("layout","source2-6759-v1")||!equal("manifest",reader_manifest_id)||!equal("validation","passed"))
+        if(!equal("format","2")||!equal("layout","source2-reader-v2")||!equal("manifest",reader_manifest_id)||!equal("validation","passed"))
             return fail("Reader profile format or resolver version differs; rebuild data tools");
         if(!equal("client_hash",client)||!equal("engine_hash",engine)||!equal("world_hash",world))return fail("Reader profile belongs to a different DLL build: press Update all data");
         ReaderProfile next;
@@ -60,9 +73,16 @@ struct ReaderProfile {
         auto module_size=[&](std::string_view module){return module=="client"?client_size:module=="engine"?engine_size:module=="world"?world_size:0;};
 #define PROFILE_FIELD(key,value,cls,field) if(!number("field." #key,next.fields.key,0x20000))return fail("Invalid schema field: " #key);
 #define PROFILE_ADDRESS(key,value,module) if(!number("address." #key,next.addresses.key,module_size(module))||next.addresses.key<0x1000)return fail("Invalid address: " #key);
+#define PROFILE_VALUE(key,value) if(!number("private." #key,next.layout.key,0x20000))return fail("Invalid private layout value: " #key);
 #include "reader_profile_values.inc"
 #undef PROFILE_FIELD
 #undef PROFILE_ADDRESS
+#undef PROFILE_VALUE
+        const auto& private_values=next.layout;
+        if(!private_values.bullet_speed_index||private_values.bullet_speed_index>=1024||!private_values.bullet_override_index||private_values.bullet_override_index>=1024
+            ||private_values.bullet_speed_index==private_values.bullet_override_index||private_values.modifier_cache>=0x10000||(private_values.modifier_cache&15)
+            ||private_values.modifier_cache<0x214+2*(std::max(private_values.bullet_speed_index,private_values.bullet_override_index)+1))
+            return fail("Invalid modifier cache layout");
         const auto& f=next.fields;
         auto span=[](std::initializer_list<uint32_t> offsets){auto [low,high]=std::minmax_element(offsets.begin(),offsets.end());return *high-*low<4090;};
         if(!span({f.scene_node,f.health,f.max_health,f.life_state,f.team})||!span({f.pawn_handle,f.local_controller})

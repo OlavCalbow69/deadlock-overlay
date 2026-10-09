@@ -69,6 +69,41 @@ sealed class PeImage {
         }
         return result.ToArray();
     }
+    // EModifierValue registration records contain name/value pairs at a 0x20
+    // stride. Verify both neighboring records so an unrelated name reference
+    // cannot be mistaken for the enum's numeric value.
+    public uint ModifierValue(string name) {
+        const string prefix = "MODIFIER_VALUE_";
+        if (!name.StartsWith(prefix, StringComparison.Ordinal)) throw new InvalidDataException("Invalid modifier name");
+        var needle = Encoding.ASCII.GetBytes(name + "\0");var prefixBytes = Encoding.ASCII.GetBytes(prefix);
+        var names = new HashSet<uint>();var values = new HashSet<uint>();
+        foreach (var s in Sections.Where(s => (s.Flags & 0x20000000) == 0)) {
+            var bytes = Bytes.AsSpan(s.Offset, s.Size);int offset = 0;
+            while (offset < bytes.Length) {
+                int found = bytes[offset..].IndexOf(needle);if (found < 0) break;found += offset;offset = found + 1;names.Add(s.Rva + (uint)found);
+            }
+        }
+        bool Neighbor(uint address, ulong expected) {
+            try {
+                var entry = At(address, 16);ulong pointer = BinaryPrimitives.ReadUInt64LittleEndian(entry);
+                return BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]) == expected && pointer >= Base && pointer - Base < Size
+                    && Data((uint)(pointer - Base)) && At((uint)(pointer - Base), prefixBytes.Length).SequenceEqual(prefixBytes);
+            } catch (InvalidDataException) { return false; }
+        }
+        foreach (uint nameRva in names) {
+            var pointer = new byte[8];BinaryPrimitives.WriteUInt64LittleEndian(pointer, Base + nameRva);
+            foreach (var s in Sections.Where(s => (s.Flags & 0x20000000) == 0)) {
+                var bytes = Bytes.AsSpan(s.Offset, s.Size);int offset = 0;
+                while (offset < bytes.Length) {
+                    int found = bytes[offset..].IndexOf(pointer);if (found < 0) break;found += offset;offset = found + 1;
+                    uint at = s.Rva + (uint)found;if ((at & 7) != 0 || found + 16 > bytes.Length || at < 32) continue;
+                    ulong value = BinaryPrimitives.ReadUInt64LittleEndian(bytes[(found + 8)..]);
+                    if (value is > 0 and < 1023 && Neighbor(at - 32, value - 1) && Neighbor(at + 32, value + 1)) values.Add((uint)value);
+                }
+            }
+        }
+        return values.Count == 1 ? values.Single() : throw new InvalidDataException("Named modifier value is missing or ambiguous: " + name);
+    }
     public uint Vtable(string type) {
         var name = Encoding.ASCII.GetBytes(type + "\0"); var descriptors = new HashSet<uint>();
         foreach (var s in Sections.Where(s => (s.Flags & 0x20000000) == 0)) {

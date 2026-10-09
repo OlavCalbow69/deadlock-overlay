@@ -516,7 +516,10 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
         if(key==21){std::memcpy(&handle,entry.data()+4,4);slot_address=entries+12*size_t(index);break;}
         std::memcpy(&index,entry.data()+8,4);
     }
-    auto ability=entity(chunks,handle);if(!ability.address||type(ability.address).find("PrimaryWeapon")==std::string::npos)return result;
+    // Slot 21 identifies the primary weapon. Hero-specific classes, including
+    // Silver's rifle, need not contain "PrimaryWeapon" in their RTTI name.
+    // The named weapon-info entry and stable identities below validate its data.
+    auto ability=entity(chunks,handle);if(!ability.address)return result;
     auto vdata=pointer(ability.address+0x390);if(!vdata)return result;
     std::array<unsigned char,32> weapon_map{};if(!read(vdata+profile_.fields.weapon_map,weapon_map))return result;
     uint32_t capacity{};uintptr_t array{};int root{};
@@ -533,13 +536,16 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     if(!info)return result;
     std::array<unsigned char,32> values{};if(!read(info+0xd8,values))return result;
     std::memcpy(&result.base_speed,values.data(),4);std::memcpy(&result.random_factor,values.data()+4,4);std::memcpy(&result.inheritance,values.data()+28,4);
-    // Build 6759 EModifierValue: bonus bullet speed=171, base override=172.
-    // Aggregate reader client+0x129EF30 uses +0x210 version, +0x214 dirty
-    // words and 0x30-byte mirrors beginning at +0x400.
-    constexpr uint32_t speed_index=171,version_offset=0x210,dirty_offset=0x214,cache_offset=0x400;
+    // Named modifier IDs and the cache base come from the validated profile.
+    // The code witness still pins the version/dirty fields and 0x30-byte stride.
+    const auto speed_index=profile_.layout.bullet_speed_index,override_index=profile_.layout.bullet_override_index;
+    const auto cache_offset=profile_.layout.modifier_cache;
+    constexpr uint32_t version_offset=0x210,dirty_offset=0x214;
     auto prop=pointer(pawn.address+profile_.fields.modifier_property);uint32_t version_before{},version_after{};
     std::array<uint8_t,2> groups{};
-    if(!prop||!read(prop+version_offset,version_before)||!read(prop+160+speed_index,groups))return result;
+    if(!prop||!read(prop+version_offset,version_before))return result;
+    if(override_index==speed_index+1) {if(!read(prop+160+speed_index,groups))return result;}
+    else if(!read(prop+160+speed_index,groups[0])||!read(prop+160+override_index,groups[1]))return result;
     if(groups[1]!=255){result.status="Weapon speed override active";return result;}
     if(groups[0]!=255){
         result.status="Waiting for fresh bullet-speed modifier";
