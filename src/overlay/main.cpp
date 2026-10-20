@@ -1,8 +1,17 @@
 #include "game_reader.h"
 #include "replay_camera.h"
+#include "camera_profile.h"
+#include "ray_click.h"
+#include "auto_parry_ui.h"
+#include "auto_click_ui.h"
+#include "adaptive_focus.h"
+#include "x2_target_lock.h"
+#include "target_zone_outline.h"
+#include "health_visuals.h"
 #include "frame_pacing.h"
 #include "game_frames.h"
 #include "data_update.h"
+#include "session_monitor_ui.h"
 #include "platform/d3d11_renderer.h"
 #include "ui/foundation/theme.h"
 #include "ui/foundation/typography/font_cache.h"
@@ -37,6 +46,7 @@ namespace overlay {
 double clock_ms(){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 bool prefer_composition=true;
 bool high_priority=true;
+bool menu_preview_mode=false;
 std::atomic_bool shutdown_requested{false};
 HANDLE shutdown_complete{};
 BOOL WINAPI console_handler(DWORD event) {
@@ -55,90 +65,100 @@ std::filesystem::path config_path() {
     auto directory=size && size<32768 ? std::filesystem::path(path)/L"DeadlockOverlay" : executable_directory();
     std::filesystem::create_directories(directory); return directory/L"settings.ini";
 }
-struct Settings {
-    bool enabled=true, numbers=true,glass=true,dark=true,exclude_teammates=false;
+struct Settings : CameraFocusSettings {
+    bool enabled=true, numbers=true,glass=true,dark=true;
+    float healthbar_box_gap_meters=.25f;
+    bool healthbar_debug_box=false,hide_visible_healthbars=false;
     bool transparent_frame=true;float frame_opacity=.72f;
-    bool head_dot=false,body_dot=false,pelvis_dot=false;
-    bool skeletons=false,hitboxes=false;
+    bool show_monitor_hud=false,show_midboss_hud=true;
+    bool skeletons=false,hitboxes=false,hide_visible_skeletons=false;
+    bool hidden_enemy_tags=false,hide_visible_enemy_tags=true;
+    HealthVisualsActivation health_visuals{};
     ImVec4 skeleton_visible{.2f,.62f,1.f,1.f},skeleton_hidden{.68f,.32f,1.f,1.f};
-    bool focus_players=true,focus_minions=false,focus_orbs=false;
-    bool replay_focus=true,debug_focus=true;int focus_bone=1;
-    float focus_speed=12.f,projectile_speed=30000.f;
-    bool sniper_speed_override=true;float sniper_focus_speed=12.f;
-    bool free_focus=false,prediction=false,inherit_velocity=false,auto_speed=true;
-    FreeMovementMode free_focus_mode{FreeMovementMode::BoneLine};
-    FocusHoldButton focus_hold_button{FocusHoldButton::SideButtons};
-    bool visible_only=true;
-    bool focus_visuals=true;
-    FocusArea focus_area{};
-    std::array<bool,3> show_focus_area{};
-    float width=80,height=6,gap=8;
-    ImVec4 green{0.0f,0.74f,0.42f,1}, amber{0.98f,0.61f,0,1}, red{0.93f,0.2f,0.23f,1};
+    bool vindicta_ult_override=true;
+    CameraFocusSettings vindicta_ult=assassinate_controls();
+    AutoParrySettings auto_parry{};
 };
 void save(const Settings& s,const std::filesystem::path& path=config_path()) {
-    std::ofstream out(path);out<<"enabled="<<s.enabled<<"\nnumbers="<<s.numbers<<"\nglass="<<s.glass<<"\ndark="<<s.dark
-        <<"\nexclude_teammates="<<s.exclude_teammates<<"\nhead_dot="<<s.head_dot<<"\nbody_dot="<<s.body_dot<<"\npelvis_dot="<<s.pelvis_dot<<"\ndebug_focus="<<s.debug_focus<<"\nreplay_focus="<<s.replay_focus<<"\nfocus_speed="<<s.focus_speed<<"\nfocus_bone="<<s.focus_bone<<"\nauto_speed="<<s.auto_speed<<"\nfree_focus="<<s.free_focus<<"\nprediction="<<s.prediction<<"\ninherit_velocity="<<s.inherit_velocity<<"\nprojectile_speed="<<s.projectile_speed<<"\nwidth="<<s.width<<"\nheight="<<s.height<<"\ngap="<<s.gap<<'\n';
-    const ImVec4* colors[]={&s.green,&s.amber,&s.red};const char* names[]={"green","amber","red"};
-    out<<"visible_only="<<s.visible_only<<'\n';
-    out<<"focus_visuals="<<s.focus_visuals<<'\n';
-    out<<"sniper_speed_override="<<s.sniper_speed_override<<"\nsniper_focus_speed="<<s.sniper_focus_speed<<'\n';
-    out<<"focus_area_mode="<<int(s.focus_area.mode)<<"\nfocus_fov_percent="<<s.focus_area.center_percent<<"\nfocus_radius_meters="<<s.focus_area.radius_meters<<'\n';
-    for(int i=0;i<3;++i)out<<"show_focus_area_"<<i<<'='<<s.show_focus_area[i]<<'\n';
+    if(menu_preview_mode)return;
+    std::ofstream out(path);out<<"enabled="<<s.enabled<<"\nnumbers="<<s.numbers<<"\nglass="<<s.glass<<"\ndark="<<s.dark<<'\n';
+    write_camera_settings(out,s);
+    out<<"vindicta_ult_override="<<s.vindicta_ult_override<<'\n';
+    write_camera_settings(out,assassinate_controls(s.vindicta_ult),"vindicta_ult_");
+    write_parry_settings(out,s.auto_parry);
     out<<"transparent_frame="<<s.transparent_frame<<"\nframe_opacity="<<s.frame_opacity<<'\n';
-    out<<"skeletons="<<s.skeletons<<"\nfocus_players="<<s.focus_players<<"\nfocus_minions="<<s.focus_minions<<"\nfocus_orbs="<<s.focus_orbs<<'\n';
+    out<<"show_monitor_hud="<<s.show_monitor_hud<<'\n';
+    out<<"show_midboss_hud="<<s.show_midboss_hud<<'\n';
+    out<<"healthbar_box_gap_meters="<<s.healthbar_box_gap_meters<<"\nhealthbar_debug_box="<<s.healthbar_debug_box<<'\n';
+    out<<"hide_visible_healthbars="<<s.hide_visible_healthbars<<"\nhide_visible_enemy_tags="<<s.hide_visible_enemy_tags<<'\n';
+    out<<"skeletons="<<s.skeletons<<'\n';
+    out<<"hide_visible_skeletons="<<s.hide_visible_skeletons<<'\n';
     out<<"hitboxes="<<s.hitboxes<<'\n';
-    out<<"free_focus_mode="<<int(s.free_focus_mode)<<'\n';
-    out<<"focus_hold_button="<<int(s.focus_hold_button)<<'\n';
+    out<<"hidden_enemy_tags="<<s.hidden_enemy_tags<<'\n';
+    out<<"health_visuals_hold="<<s.health_visuals.hold_only<<"\nhealth_visuals_key="<<s.health_visuals.key<<'\n';
     out<<"skeleton_visible="<<s.skeleton_visible.x<<' '<<s.skeleton_visible.y<<' '<<s.skeleton_visible.z<<'\n';
     out<<"skeleton_hidden="<<s.skeleton_hidden.x<<' '<<s.skeleton_hidden.y<<' '<<s.skeleton_hidden.z<<'\n';
-    for(int i=0;i<3;++i) out<<names[i]<<'='<<colors[i]->x<<' '<<colors[i]->y<<' '<<colors[i]->z<<'\n';
 }
 Settings load(const std::filesystem::path& path=config_path()) {
-    Settings s;std::ifstream in(path); std::string line;bool loaded_sniper_speed=false;
+    Settings s;std::ifstream in(path);std::string line;
+    bool legacy_override=true,loaded_override=false,legacy_tags_hold=false,loaded_visuals_hold=false;float legacy_speed{};
+    std::vector<std::pair<std::string,std::string>> ult_values;
+    FocusAreaMigration area_migration,ult_area_migration;
     while(std::getline(in,line)) {
         auto at=line.find('=');if(at==std::string::npos) continue;
         auto key=line.substr(0,at),value=line.substr(at+1);std::istringstream data(value);
+        if(key=="vindicta_ult_override") {int n{};if(data>>n){s.vindicta_ult_override=n!=0;loaded_override=true;}continue;}
+        if(key.starts_with("vindicta_ult_")){ult_values.emplace_back(key.substr(13),value);continue;}
+        if(area_migration.read(key,data))continue;
+        if(read_camera_setting(s,key,data))continue;
+        if(read_parry_setting(s.auto_parry,key,data))continue;
         if(key=="enabled") {int n{};if(data>>n)s.enabled=n!=0;}
-        else if(key=="exclude_teammates") {int n{};if(data>>n)s.exclude_teammates=n!=0;}
         else if(key=="numbers") {int n{};if(data>>n)s.numbers=n!=0;}
         else if(key=="glass") {int n{};if(data>>n)s.glass=n!=0;}
         else if(key=="transparent_frame") {int n{};if(data>>n)s.transparent_frame=n!=0;}
+        else if(key=="show_monitor_hud") {int n{};if(data>>n)s.show_monitor_hud=n!=0;}
+        else if(key=="show_midboss_hud") {int n{};if(data>>n)s.show_midboss_hud=n!=0;}
+        else if(key=="healthbar_debug_box") {int n{};if(data>>n)s.healthbar_debug_box=n!=0;}
+        else if(key=="healthbar_box_gap_meters") {float n{};if(data>>n&&std::isfinite(n))s.healthbar_box_gap_meters=n;}
         else if(key=="dark") {int n{};if(data>>n)s.dark=n!=0;}
 
-        else if(key=="head_dot") {int n{};if(data>>n)s.head_dot=n!=0;}
-        else if(key=="body_dot") {int n{};if(data>>n)s.body_dot=n!=0;}
-        else if(key=="pelvis_dot") {int n{};if(data>>n)s.pelvis_dot=n!=0;}
-        else if(key=="replay_focus") {int n{};if(data>>n)s.replay_focus=n!=0;}
-        else if(key=="debug_focus") {int n{};if(data>>n)s.debug_focus=n!=0;}
-        else if(key=="auto_speed") {int n{};if(data>>n)s.auto_speed=n!=0;}
-        else if(key=="visible_only") {int n{};if(data>>n)s.visible_only=n!=0;}
-        else if(key=="focus_visuals") {int n{};if(data>>n)s.focus_visuals=n!=0;}
-        else if(key=="sniper_speed_override") {int n{};if(data>>n)s.sniper_speed_override=n!=0;}
-        else if(key=="sniper_focus_speed") {float speed{};if(data>>speed&&std::isfinite(speed)){s.sniper_focus_speed=std::clamp(speed,1.f,120.f);loaded_sniper_speed=true;}}
-        else if(key=="focus_area_mode") {int n{};if(data>>n)s.focus_area.mode=static_cast<FocusAreaMode>(std::clamp(n,0,2));}
-        else if(key=="show_focus_area_0"||key=="show_focus_area_1"||key=="show_focus_area_2") {int n{};if(data>>n)s.show_focus_area[key.back()-'0']=n!=0;}
+        else if(key=="sniper_speed_override") {int n{};if(data>>n)legacy_override=n!=0;}
+        else if(key=="sniper_focus_speed") {float speed{};if(data>>speed&&std::isfinite(speed))legacy_speed=std::clamp(speed,1.f,120.f);}
         else if(key=="skeletons") {int n{};if(data>>n)s.skeletons=n!=0;}
+        else if(key=="hide_visible_healthbars") {int n{};if(data>>n)s.hide_visible_healthbars=n!=0;}
+        else if(key=="hide_visible_enemy_tags") {int n{};if(data>>n)s.hide_visible_enemy_tags=n!=0;}
+        else if(key=="hide_visible_skeletons") {int n{};if(data>>n)s.hide_visible_skeletons=n!=0;}
         else if(key=="hitboxes") {int n{};if(data>>n)s.hitboxes=n!=0;}
-        else if(key=="focus_players") {int n{};if(data>>n)s.focus_players=n!=0;}
-        else if(key=="focus_minions") {int n{};if(data>>n)s.focus_minions=n!=0;}
-        else if(key=="focus_orbs") {int n{};if(data>>n)s.focus_orbs=n!=0;}
-        else if(key=="free_focus") {int n{};if(data>>n)s.free_focus=n!=0;}
-        else if(key=="free_focus_mode") {int n{};if(data>>n)s.free_focus_mode=static_cast<FreeMovementMode>(std::clamp(n,0,1));}
-        else if(key=="focus_hold_button") {int n{};if(data>>n)s.focus_hold_button=static_cast<FocusHoldButton>(std::clamp(n,0,1));}
-        else if(key=="prediction") {int n{};if(data>>n)s.prediction=n!=0;}
-        else if(key=="inherit_velocity") {int n{};if(data>>n)s.inherit_velocity=n!=0;}
-        else if(key=="focus_bone") {int n{};if(data>>n)s.focus_bone=std::clamp(n,0,2);}
+        else if(key=="hidden_enemy_tags") {int n{};if(data>>n)s.hidden_enemy_tags=n!=0;}
+        else if(key=="hidden_enemy_tags_hold_h") {int n{};if(data>>n)legacy_tags_hold=n!=0;}
+        else if(key=="health_visuals_hold") {int n{};if(data>>n){s.health_visuals.hold_only=n!=0;loaded_visuals_hold=true;}}
+        else if(key=="health_visuals_key") {int n{};if(data>>n)s.health_visuals.key=n;}
         else {
-            float* target= key=="width"?&s.width:key=="height"?&s.height:key=="gap"?&s.gap:key=="focus_speed"?&s.focus_speed:key=="projectile_speed"?&s.projectile_speed:key=="frame_opacity"?&s.frame_opacity:key=="focus_fov_percent"?&s.focus_area.center_percent:key=="focus_radius_meters"?&s.focus_area.radius_meters:nullptr;
+            float* target=key=="frame_opacity"?&s.frame_opacity:nullptr;
             if(target) {float v{};if(data>>v && std::isfinite(v))*target=v;}
-            ImVec4* color=key=="green"?&s.green:key=="amber"?&s.amber:key=="red"?&s.red:key=="skeleton_visible"?&s.skeleton_visible:key=="skeleton_hidden"?&s.skeleton_hidden:nullptr;
+            ImVec4* color=key=="skeleton_visible"?&s.skeleton_visible:key=="skeleton_hidden"?&s.skeleton_hidden:nullptr;
             if(color) {float r{},g{},b{};if(data>>r>>g>>b && std::isfinite(r)&&std::isfinite(g)&&std::isfinite(b)) *color={std::clamp(r,0.f,1.f),std::clamp(g,0.f,1.f),std::clamp(b,0.f,1.f),1};}
         }
     }
-    s.width=std::clamp(s.width,40.f,200.f);s.height=std::clamp(s.height,3.f,16.f);s.gap=std::clamp(s.gap,2.f,40.f);s.focus_speed=std::clamp(s.focus_speed,1.f,120.f);s.projectile_speed=std::clamp(s.projectile_speed,1000.f,100000.f);s.frame_opacity=std::clamp(s.frame_opacity,.4f,.9f);s.focus_area=valid_focus_area(s.focus_area);
-    if(!loaded_sniper_speed)s.sniper_focus_speed=s.focus_speed;return s;
+    s.frame_opacity=std::clamp(s.frame_opacity,.4f,.9f);
+    s.healthbar_box_gap_meters=std::clamp(s.healthbar_box_gap_meters,0.f,2.f);
+    if(!loaded_visuals_hold)s.health_visuals.hold_only=legacy_tags_hold;
+    sanitize_health_visuals(s.health_visuals);
+    area_migration.apply(s);sanitize_camera_settings(s);
+    sanitize_parry_settings(s.auto_parry);
+    // Seed old installations from their current controls, then apply independent saved values.
+    s.vindicta_ult=static_cast<const CameraFocusSettings&>(s);
+    // Seed new X2 settings after loading this profile's original X1 values.
+    // Older ultimate profiles can have different speeds from the regular profile.
+    s.vindicta_ult.focus_speed_x2=s.vindicta_ult.adaptive_speed_x2=0.f;
+    if(legacy_speed>0)s.vindicta_ult.focus_speed=legacy_speed;
+    if(!loaded_override)s.vindicta_ult_override=legacy_override;
+    for(const auto& [key,value]:ult_values){std::istringstream data(value);if(!ult_area_migration.read(key,data))read_camera_setting(s.vindicta_ult,key,data);}
+    ult_area_migration.apply(s.vindicta_ult);sanitize_camera_settings(s.vindicta_ult);
+    restrict_assassinate_targets(s.vindicta_ult);
+    s.vindicta_ult.prediction=false; // Assassinate is hitscan, regardless of primary weapon settings.
+    return s;
 }
-bool show_focus_area(const Settings& settings){return settings.show_focus_area[int(valid_focus_area(settings.focus_area).mode)];}
 std::string escaped(const std::string& input) {
     std::string result;for(char c:input) {if(c=='"'||c=='\\')result+='\\';if(c=='\n'){result+="\\n";continue;}if(static_cast<unsigned char>(c)>=32)result+=c;}return result;
 }
@@ -146,12 +166,12 @@ void visibility_report(const Snapshot& s,const std::filesystem::path& path,bool 
     std::ofstream out(path);out<<"{\"enabled\":"<<(enabled?"true":"false")<<",\"map\":\""<<escaped(s.map_name)<<"\",\"level\":\""<<escaped(s.level_name)<<"\",\"map_source\":\""<<escaped(s.map_source)<<"\",\"status\":\""<<escaped(s.visibility_status)<<"\",\"triangles\":"<<(s.visibility?s.visibility->triangle_count():0)<<",\"ray_ms\":"<<s.visibility_us/1000<<",\"camera_valid\":"<<(s.camera_valid?"true":"false")<<",\"camera_position\":["<<s.camera_position.x<<','<<s.camera_position.y<<','<<s.camera_position.z<<"],\"focus_occluded\":"<<(occluded?"true":"false")<<",\"players\":[";
     bool first=true;for(const auto& p:s.players){if(!first)out<<',';first=false;out<<"{\"handle\":"<<p.handle<<",\"visible\":"<<(p.visible?"true":"false")<<",\"bones\":[";for(int i=0;i<3;++i){if(i)out<<',';out<<(p.dot_visible[i]?"true":"false");}out<<"]}";}out<<"]}\n";
 }
-void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool visible=false,LONG_PTR style=0,HWND overlay_window=nullptr,bool settings_visible=false,double target_hz=0,double render_fps=0,int drawn_hitboxes=0) {
+void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool visible=false,LONG_PTR style=0,HWND overlay_window=nullptr,bool settings_visible=false,double target_hz=0,double render_fps=0,int drawn_hitboxes=0,int hidden_tags=0) {
     DWORD foreground_pid{};GetWindowThreadProcessId(GetForegroundWindow(),&foreground_pid);
     RECT bounds{};if(overlay_window)GetWindowRect(overlay_window,&bounds);
-    std::ofstream out(path);out<<"{\n\"pid\":"<<s.pid<<",\"status\":\""<<escaped(s.status)<<"\",\"reader_profile\":\""<<escaped(s.reader_profile)<<"\",\"sample_time\":"<<s.time
+    std::ofstream out(path);out<<"{\n\"pid\":"<<s.pid<<",\"status\":\""<<escaped(s.status)<<"\",\"reader_profile\":\""<<escaped(s.reader_profile)<<"\",\"sample_time\":"<<s.time<<",\"hidden_tags_drawn\":"<<hidden_tags
         <<",\"map\":\""<<escaped(s.map_name)<<"\",\"level\":\""<<escaped(s.level_name)<<"\",\"map_source\":\""<<escaped(s.map_source)<<"\",\"visibility_status\":\""<<escaped(s.visibility_status)<<"\",\"triangles\":"<<(s.visibility?s.visibility->triangle_count():0)
-        <<",\"controllers\":"<<s.controllers<<",\"local_team\":"<<unsigned(s.local_team)<<",\"invalid_handles\":"<<s.invalid_handles<<",\"missing_anchors\":"<<s.missing_anchors
+        <<",\"controllers\":"<<s.controllers<<",\"local_team\":"<<unsigned(s.local_team)<<",\"local_alive\":"<<(s.local_alive?"true":"false")<<",\"invalid_handles\":"<<s.invalid_handles<<",\"missing_anchors\":"<<s.missing_anchors
         <<",\"drawn_bars\":"<<bars<<",\"overlay_visible\":"<<(visible?"true":"false")<<",\"overlay_extended_style\":"<<style
         <<",\"drawn_hitboxes\":"<<drawn_hitboxes
         <<",\"foreground_pid\":"<<foreground_pid<<",\"settings_visible\":"<<(settings_visible?"true":"false")
@@ -166,10 +186,11 @@ void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool
     first=true;for(const auto& p:s.players) {if(!first)out<<',';first=false;
         out<<"{\"handle\":"<<p.handle<<",\"team\":"<<unsigned(p.team)<<",\"health\":"<<p.health<<",\"maximum\":"<<p.maximum<<",\"anchor\":\""<<escaped(p.anchor)
             <<"\",\"model\":\""<<escaped(p.model_name)<<"\",\"bone_rig\":\""<<escaped(p.bone_rig)<<"\",\"anchor_status\":\""<<escaped(p.anchor_status)
-            <<"\",\"world\":["<<p.head.x<<','<<p.head.y<<','<<p.head.z<<"],\"dots\":[";
+            <<"\",\"hero_name\":\""<<escaped(p.hero_name)<<"\",\"feet_valid\":"<<(p.feet_valid?"true":"false")
+            <<",\"feet\":["<<p.feet.x<<','<<p.feet.y<<','<<p.feet.z<<"],\"world\":["<<p.head.x<<','<<p.head.y<<','<<p.head.z<<"],\"dots\":[";
         for(size_t i=0;i<3;++i){if(i)out<<',';if(p.dot_valid[i])out<<'['<<p.dots[i].x<<','<<p.dots[i].y<<','<<p.dots[i].z<<']';else out<<"null";}
         size_t visible_segments=0,unknown_segments=0;for(const auto& segment:p.skeleton){if(segment.visible)++visible_segments;if(!segment.visibility_known)++unknown_segments;}
-        out<<"],\"skeleton_segments\":"<<p.skeleton.size()<<",\"skeleton_visible\":"<<visible_segments<<",\"skeleton_unknown\":"<<unknown_segments
+        out<<"],\"body_bound_points\":"<<p.body_point_count<<",\"skeleton_segments\":"<<p.skeleton.size()<<",\"skeleton_visible\":"<<visible_segments<<",\"skeleton_unknown\":"<<unknown_segments
             <<",\"hitbox_set\":"<<p.hitbox_set<<",\"hitbox_status\":\""<<escaped(p.hitbox_status)<<"\",\"hitboxes\":[";
         for(size_t i=0;i<p.hitboxes.size();++i) {
             if(i)out<<',';const auto& box=p.hitboxes[i];
@@ -183,9 +204,119 @@ void report(const Snapshot& s,const std::filesystem::path& path,int bars=-1,bool
         if(!first)out<<',';first=false;
         out<<"{\"handle\":"<<target.handle<<",\"kind\":\""<<target_kind_name(target.kind)<<"\",\"team\":"<<unsigned(target.team)<<",\"health\":"<<target.health<<",\"maximum\":"<<target.maximum<<",\"visible\":"<<(target.visible?"true":"false")<<",\"dots\":[";
         for(int i=0;i<3;++i){if(i)out<<',';if(target.dot_valid[i])out<<'['<<target.dots[i].x<<','<<target.dots[i].y<<','<<target.dots[i].z<<']';else out<<"null";}
-        out<<"],\"hitboxes\":"<<target.hitboxes.size()<<",\"velocity_valid\":"<<(target.velocity_valid?"true":"false")<<",\"velocity\":["<<target.velocity.x<<','<<target.velocity.y<<','<<target.velocity.z<<"]}";
+        out<<"],\"hitboxes\":"<<target.hitboxes.size()<<",\"velocity_valid\":"<<(target.velocity_valid?"true":"false")<<",\"velocity\":["<<target.velocity.x<<','<<target.velocity.y<<','<<target.velocity.z<<']'
+            <<",\"orb_state_valid\":"<<(target.orb.valid?"true":"false")<<",\"orb_phase\":\""<<orb_phase_name(target.orb.phase(GetTickCount64()))
+            <<"\",\"orb_clock\":"<<target.orb.clock<<",\"orb_launch\":"<<target.orb.launch<<",\"orb_attackable\":"<<target.orb.opens
+            <<",\"orb_end_attackable\":"<<target.orb.closes<<",\"orb_launch_number\":"<<target.orb.launch_number<<",\"orb_claim_pending\":"<<(target.orb.claim_pending?"true":"false")
+            <<",\"orb_shot_bounds\":"<<(target.shot_bounds?"true":"false")<<"}";
     }
     out<<"],\"matrix\":[";for(size_t i=0;i<s.matrix.size();++i){if(i)out<<',';out<<s.matrix[i];}out<<"]}\n";
+}
+void write_motion(std::ostream& out,const MotionSample& motion) {
+    auto vector=[&](Vec3 v){out<<'['<<v.x<<','<<v.y<<','<<v.z<<']';};
+    out<<"{\"source\":\""<<motion_source_name(motion.source)<<"\",\"measured_ms\":"<<std::setprecision(15)<<motion.measured_ms
+        <<",\"position_valid\":"<<(motion.position_valid?"true":"false")<<",\"velocity_valid\":"<<(motion.velocity_valid?"true":"false")<<",\"root\":";
+    vector(motion.root);out<<",\"velocity\":";vector(motion.velocity);out<<",\"root_estimate\":";vector(motion.root_velocity);
+    out<<",\"engine_candidate_valid\":"<<(motion.engine_candidate_valid?"true":"false")<<",\"engine_candidate\":";vector(motion.engine_velocity);out<<'}';
+}
+void write_parry_data(std::ostream& out,const ParryReadState& state,const ParryDecision& decision={},const AutoParry* controller=nullptr) {
+    auto vector=[&](Vec3 value){out<<'['<<value.x<<','<<value.y<<','<<value.z<<']';};
+    out<<"{\"valid\":"<<(state.valid?"true":"false")<<",\"ready\":"<<(state.ready?"true":"false")
+        <<",\"active\":"<<(state.active?"true":"false")<<",\"status\":\""<<escaped(state.status)<<"\",\"sampled\":"<<state.sampled
+        <<",\"local\":"<<state.local_handle<<",\"clock\":"<<state.game_time<<",\"cooldown\":"<<state.cooldown_remaining
+        <<",\"counterspell_owned\":"<<(state.counterspell_owned?"true":"false")<<",\"counterspell_ready\":"<<(state.counterspell_ready?"true":"false")
+        <<",\"counterspell_active\":"<<(state.counterspell_active?"true":"false")<<",\"spell_cooldown\":"<<state.spell_cooldown_remaining
+        <<",\"replicated_readers\":"<<state.replicated_readers<<",\"unavailable_melee\":"<<state.unavailable_melee
+        <<",\"unsupported_projectiles\":"<<state.unsupported_projectiles<<",\"local_shapes\":"<<state.local_hitboxes.size()
+        <<",\"melee_definition_valid\":"<<(state.melee_definition_valid?"true":"false")<<",\"melee_definition_status\":\""<<escaped(state.melee_definition_status)<<'"';
+    if(controller)out<<",\"controller_status\":\""<<escaped(controller->status)<<"\",\"inputs_sent\":"<<controller->confirmed_inputs;
+    out<<",\"decision\":{\"valid\":"<<(decision.valid?"true":"false")<<",\"kind\":\""<<parry_threat_name(decision.kind)
+        <<"\",\"source\":"<<decision.source<<",\"key\":"<<decision.key<<",\"impact_ms\":"<<decision.impact_ms<<"},\"melee\":[";
+    bool first=true;
+    for(const auto& attack:state.melee) {
+        if(!first)out<<',';first=false;
+        out<<"{\"pawn\":"<<attack.pawn<<",\"ability\":"<<attack.ability<<",\"team\":"<<unsigned(attack.team)
+            <<",\"valid\":"<<(attack.valid?"true":"false")<<",\"replicated\":"<<(attack.replicated?"true":"false")<<",\"status\":\""<<escaped(attack.status)
+            <<"\",\"state\":"<<attack.state<<",\"type\":"<<attack.attack_type<<",\"start\":"<<attack.state_start<<",\"activated\":"<<attack.activated
+            <<",\"trigger\":"<<attack.trigger_time<<",\"range\":"<<attack.range<<",\"half_angle\":"<<attack.half_angle
+            <<",\"parryable\":"<<(attack.parryable?"true":"false")<<",\"piercing\":"<<(attack.piercing?"true":"false")<<",\"origin\":";
+        vector(attack.origin);out<<",\"direction\":";vector(attack.direction);out<<",\"velocity\":";vector(attack.velocity);out<<'}';
+    }
+    out<<"],\"projectiles\":[";first=true;
+    for(const auto& projectile:state.projectiles) {
+        if(!first)out<<',';first=false;
+        out<<"{\"handle\":"<<projectile.handle<<",\"owner\":"<<projectile.owner<<",\"name\":\""<<escaped(projectile.name)<<"\",\"radius\":"<<projectile.radius<<",\"position\":";
+        vector(projectile.position);out<<",\"velocity\":";vector(projectile.velocity);out<<'}';
+    }
+    out<<"]}";
+}
+void report_adaptive(const Snapshot& snapshot,const CameraFocusSettings& settings,const AdaptiveFocus& focus,
+    bool sniper,double queue_ms,const std::filesystem::path& path) {
+    const auto activation=resolve_focus_activation(settings);
+    const auto& solution=focus.solution;const auto* zone=focus.zone();std::ofstream out(path);
+    out<<"{\"mode\":\"adaptive\",\"selected\":"<<(adaptive_mode(settings)?"true":"false")<<",\"enabled\":"<<(settings.replay_focus?"true":"false")
+        <<",\"status\":\""<<escaped(focus.status)<<"\",\"response_backend\":\"render_projection\",\"calibration_required\":false"
+        <<",\"hold_button_held\":"<<(focus_button_held(settings.focus_hold_button)?"true":"false")
+        <<",\"active_button\":\""<<focus_button_name(activation.button)<<"\",\"x1_speed\":"<<settings.adaptive.speed<<",\"x2_speed\":"<<settings.adaptive_speed_x2
+        <<",\"view_horizontal_fov\":"<<snapshot.projection.horizontal_fov<<",\"view_vertical_fov\":"<<snapshot.projection.vertical_fov
+        <<",\"view_input_valid\":"<<(snapshot.view_input.valid?"true":"false")
+        <<",\"sliding\":"<<(snapshot.view_input.sliding?"true":"false")<<",\"weapon_zoom\":"<<(snapshot.view_input.weapon_zoom?"true":"false")
+        <<",\"fov_sensitivity\":"<<snapshot.view_input.fov_sensitivity<<",\"mouse_sensitivity\":"<<snapshot.view_input.mouse_sensitivity
+        <<",\"pixel_error\":["<<solution.pixel_error.x<<','<<solution.pixel_error.y<<"],\"requested_pixels\":["<<solution.requested_pixels.x<<','<<solution.requested_pixels.y
+        <<"],\"requested_counts\":["<<solution.requested_x<<','<<solution.requested_y<<']'
+        <<",\"region_setting\":\""<<adaptive_region_name(settings.adaptive.region)<<"\",\"selected_region\":\""<<region_name(solution.region)
+        <<"\",\"target\":"<<focus.target()<<",\"target_kind\":\""<<target_kind_name(solution.kind)<<"\",\"hitbox_source\":"<<solution.source_id
+        <<",\"retained\":"<<(solution.retained?"true":"false")<<",\"occluded\":"<<(solution.occluded?"true":"false")<<",\"inside_region\":"<<(solution.inside?"true":"false")
+        <<",\"solution_valid\":"<<(solution.valid?"true":"false")<<",\"permitted_hitboxes\":"<<solution.box_count
+        <<",\"acquisition_degrees\":"<<settings.adaptive.radius_degrees<<",\"retention_degrees\":"<<settings.adaptive.radius_degrees*1.3f
+        <<",\"area_mode\":\""<<adaptive_area_name(settings.adaptive.area)<<"\",\"zone_status\":\""<<focus.zone_status()
+        <<"\",\"zone_preview_target\":"<<focus.preview_target()<<",\"zone_target\":"<<(zone?zone->target:0)
+        <<",\"zone_body_height\":"<<(zone?zone->body_height:0)<<",\"zone_padding_percent\":"<<settings.adaptive.padding_percent
+        <<",\"zone_padding\":"<<(zone?zone->padding:0)<<",\"zone_retention_padding\":"<<(zone?zone->retention_padding:0)
+        <<",\"zone_primitives\":"<<(zone?zone->activation.size():0)<<",\"zone_activation_hit\":"<<(zone&&zone->activation_hit?"true":"false")
+        <<",\"zone_retention_hit\":"<<(zone&&zone->retention_hit?"true":"false")
+        <<",\"nearest_degrees\":"<<solution.acquisition_angle<<",\"speed\":"<<activation.adaptive_speed<<",\"response_ms\":"<<adaptive_response_ms(activation.adaptive_speed)
+        <<",\"prediction_enabled\":"<<(settings.adaptive.prediction?"true":"false")<<",\"prediction_active\":"<<(solution.prediction_active?"true":"false")
+        <<",\"prediction_status\":\""<<solution.prediction_status<<"\",\"motion_source\":\""<<motion_source_name(solution.motion_source)
+        <<"\",\"target_age_ms\":"<<solution.data_age_ms<<",\"projectile_flight_ms\":"<<solution.flight_time*1000<<",\"host_queue_ms\":"<<queue_ms
+        <<",\"assassinate_hitscan\":"<<(sniper?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_speed\":"<<snapshot.weapon.speed
+        <<",\"moves\":"<<focus.moves<<",\"input_failures\":"<<focus.input_failures<<",\"current_point\":["<<solution.current_point.x<<','<<solution.current_point.y<<','<<solution.current_point.z
+        <<"],\"predicted_point\":["<<solution.aim_point.x<<','<<solution.aim_point.y<<','<<solution.aim_point.z<<"],\"zone_exclusions\":[";
+    bool first=true;for(const auto& issue:focus.zone_issues()) {
+        if(!first)out<<',';first=false;
+        out<<"{\"target\":"<<issue.target<<",\"kind\":\""<<target_kind_name(issue.kind)<<"\",\"reason\":\""<<escaped(issue.reason)<<"\"}";
+    }
+    out<<"],\"local_motion\":";
+    write_motion(out,snapshot.local_motion);out<<"}\n";
+}
+void report_x2_lock(const Snapshot& snapshot,const CameraFocusSettings& settings,const X2TargetLock& lock,const FocusActivation& activation,const std::filesystem::path& path) {
+    const auto& point=lock.solution;std::ofstream out(path);
+    out<<"{\"enabled\":"<<(settings.x2_target_lock?"true":"false")<<",\"active\":"<<(lock.active()?"true":"false")
+        <<",\"release_required\":"<<(lock.spent()?"true":"false")<<",\"status\":\""<<escaped(lock.status)<<"\",\"target\":"<<lock.target()
+        <<",\"target_kind\":\""<<target_kind_name(point.kind)<<"\",\"fov_degrees\":360,\"speed\":"<<(adaptive_mode(settings)?activation.adaptive_speed:activation.speed)
+        <<",\"solution_valid\":"<<(point.valid?"true":"false")<<",\"inside_region\":"<<(point.inside?"true":"false")
+        <<",\"angular_distance\":"<<point.acquisition_angle<<",\"prediction\":\""<<point.prediction_status<<"\",\"flight_ms\":"<<point.flight_time*1000
+        <<",\"data_age_ms\":"<<point.data_age_ms<<",\"requested_counts\":["<<point.requested_x<<','<<point.requested_y<<']'
+        <<",\"moves\":"<<lock.moves<<",\"input_failures\":"<<lock.input_failures<<",\"pid\":"<<snapshot.pid<<"}\n";
+}
+void report_adaptive_geometry(const Snapshot& snapshot,const std::filesystem::path& path) {
+    std::ofstream out(path);out<<"{\"input_disabled\":true,\"local_motion\":";write_motion(out,snapshot.local_motion);
+    out<<",\"targets\":[";bool first=true;
+    for(const auto& target:snapshot.players) {
+        if(!first)out<<',';first=false;std::array<size_t,5> counts{};
+        for(const auto& box:target.hitboxes)++counts[size_t(box.region)];
+        out<<"{\"handle\":"<<target.handle<<",\"model\":\""<<escaped(target.model_name)<<"\",\"rig\":\""<<escaped(target.bone_rig)<<"\",\"active_hitboxes\":"<<target.hitboxes.size()
+            <<",\"unknown\":"<<counts[0]<<",\"head_neck\":"<<counts[1]<<",\"torso\":"<<counts[2]<<",\"pelvis\":"<<counts[3]<<",\"limbs\":"<<counts[4]<<",\"motion\":";
+        write_motion(out,target.motion);out<<",\"regions\":[";
+        for(int i=0;i<2;++i) {
+            if(i)out<<',';AdaptiveSettings settings;settings.region=selectable_adaptive_region(i);
+            auto point=adaptive_closest(snapshot,target,settings,1,{},true);
+            out<<"{\"name\":\""<<adaptive_region_name(settings.region)<<"\",\"geometry\":"<<(point.geometry?"true":"false")<<",\"visible_point\":"<<(point.valid?"true":"false")
+                <<",\"inside\":"<<(point.inside?"true":"false")<<",\"nearest_degrees\":"<<point.distance<<",\"source_id\":"<<point.source_id<<'}';
+        }
+        out<<"]}";
+    }
+    out<<"]}\n";
 }
 void report_hitbox_focus(const Snapshot& snapshot,float width,float height,const std::filesystem::path& path) {
     std::ofstream out(path);ScreenPoint center{width*.5f,height*.5f};
@@ -208,6 +339,43 @@ void report_hitbox_focus(const Snapshot& snapshot,float width,float height,const
     for(const auto& target:snapshot.players)target_report(target);
     for(const auto& target:snapshot.focus_targets)if(target.kind==TargetKind::Minion)target_report(target);
     out<<"],\"average_geometry_us\":"<<(calls?microseconds/calls:0)<<"}\n";
+}
+void write_crosshair_hit(std::ostream& out,const CrosshairHit& hit) {
+    out<<"{\"status\":\""<<(hit.state==CrosshairState::OrbUnavailable?orb_phase_name(hit.orb_phase):crosshair_state_name(hit.state))<<"\",\"eligible\":"<<((hit.state==CrosshairState::Enemy||hit.state==CrosshairState::SoulOrb)?"true":"false")
+        <<",\"target\":"<<hit.target<<",\"hitbox\":"<<hit.hitbox<<",\"distance\":"<<hit.distance
+        <<",\"kind\":\""<<target_kind_name(hit.kind)<<"\",\"valid_until\":"<<hit.valid_until
+        <<",\"origin\":["<<hit.origin.x<<','<<hit.origin.y<<','<<hit.origin.z<<"],\"point\":["<<hit.point.x<<','<<hit.point.y<<','<<hit.point.z<<"]}";
+}
+void report_ray_click(const Snapshot& snapshot,float width,float height,const std::filesystem::path& path) {
+    // Diagnostic only: this path never starts the MAKCU backend or sends input.
+    std::ofstream out(path);
+    out<<"{\"input_disabled\":true,\"pid\":"<<snapshot.pid<<",\"local_team\":"<<unsigned(snapshot.local_team)
+        <<",\"local_alive\":"<<(snapshot.local_alive?"true":"false")<<",\"width\":"<<width<<",\"height\":"<<height<<",\"crosshair\":";
+    write_crosshair_hit(out,crosshair_hit(snapshot,width,height,{width*.5f,height*.5f}));
+    out<<",\"orb_crosshair\":";write_crosshair_hit(out,crosshair_hit(snapshot,width,height,{width*.5f,height*.5f},true));
+    out<<",\"projected_hitbox_queries\":[";bool first=true;
+    for(const auto& player:snapshot.players) {
+        unsigned projected{},same_player{},eligible{},blocked{};
+        for(const auto& box:player.hitboxes) {
+            ScreenPoint pixel{};if(!project(snapshot.matrix,hitbox_center(box),width,height,pixel))continue;
+            ++projected;auto hit=crosshair_hit(snapshot,width,height,pixel);
+            if(hit.target==player.handle)++same_player;
+            if(hit.state==CrosshairState::Enemy)++eligible;
+            if(hit.state==CrosshairState::Blocked)++blocked;
+        }
+        if(!first)out<<',';first=false;
+        out<<"{\"handle\":"<<player.handle<<",\"team\":"<<unsigned(player.team)<<",\"hitboxes\":"<<player.hitboxes.size()
+            <<",\"projected_centers\":"<<projected<<",\"nearest_is_this_player\":"<<same_player<<",\"eligible_enemy_rays\":"<<eligible<<",\"blocked_rays\":"<<blocked<<"}";
+    }
+    out<<"],\"orb_queries\":[";first=true;
+    for(const auto& orb:snapshot.focus_targets)if(orb.kind==TargetKind::SoulOrb) {
+        if(!first)out<<',';first=false;ScreenPoint pixel{};
+        const bool projected=orb.dot_valid[1]&&project(snapshot.matrix,orb.dots[1],width,height,pixel);
+        out<<"{\"handle\":"<<orb.handle<<",\"state_valid\":"<<(orb.orb.valid?"true":"false")<<",\"phase\":\""<<orb_phase_name(orb.orb.phase(GetTickCount64()))
+            <<"\",\"shot_bounds\":"<<(orb.shot_bounds?"true":"false")<<",\"projected\":"<<(projected?"true":"false")<<",\"hit\":";
+        if(projected)write_crosshair_hit(out,crosshair_hit(snapshot,width,height,pixel,true));else out<<"null";out<<'}';
+    }
+    out<<"]}\n";
 }
 int self_test() {
     int passed{},failed{};auto check=[&](bool value){value?++passed:++failed;};
@@ -275,10 +443,6 @@ int self_test() {
     events.target(456);check(events.count()==0&&!events.fresh());
     check(include_player(false,2,2));check(!include_player(true,2,2));check(include_player(true,2,3));
     check(include_player(true,0,2));check(include_player(true,2,0));check(!include_player(true,3,3));
-    auto horizontal=bar_rect({100,100},80,6,8,1);check(horizontal.left==60&&horizontal.right==140&&horizontal.top==86&&horizontal.bottom==92);
-    auto scaled=bar_rect({100,100},80,6,8,2);check(scaled.left==20&&scaled.right==180&&scaled.top==72&&scaled.bottom==84);
-    auto half=bar_fill(horizontal,.5f);check(half.left==60&&half.right==100);
-    check(bar_fill(horizontal,0).right==horizontal.left);check(bar_fill(horizontal,2).right==horizontal.right);
     check(camera_allowed(true,true,true,false,true,1020,1000));
     check(!camera_allowed(true,false,true,false,true,1020,1000));
     check(!camera_allowed(true,true,false,false,true,1020,1000));
@@ -333,15 +497,15 @@ check(camera_mode_allowed(false,false,true));
     check(extra_target_kind(".?AVCItemXP@@")==TargetKind::SoulOrb);check(extra_target_kind(".?AVC_NPC_Trooper@@")==TargetKind::Minion);
     check(extra_target_kind(".?AVC_NPC_TrooperNeutral@@")==TargetKind::Minion);check(extra_target_kind(".?AVC_NPC_TrooperBoss@@")==TargetKind::None);
     check(extra_target_kind(".?AVC_Citadel_Pickup_AssignedGold@@")==TargetKind::None);
-    Snapshot choices;choices.matrix=identity;choices.local_team=2;choices.players.resize(1);
-    choices.players[0].handle=10;choices.players[0].team=3;choices.players[0].dot_valid.fill(true);choices.players[0].dots=body_line;
-    FocusTarget minion;minion.handle=20;minion.kind=TargetKind::Minion;minion.team=3;minion.dot_valid.fill(true);minion.dots.fill({.1f,0,0});
-    FocusTarget orb=minion;orb.handle=30;orb.kind=TargetKind::SoulOrb;orb.team=2;orb.dots.fill({0,0,0});choices.focus_targets={minion,orb};
+    Snapshot choices;choices.matrix={1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};choices.local_team=2;choices.players.resize(1);
+    choices.players[0].handle=10;choices.players[0].team=3;choices.players[0].dot_valid.fill(true);choices.players[0].dots={Vec3{.05f,.5f,1},Vec3{.05f,0,1},Vec3{.05f,-.5f,1}};
+    FocusTarget minion;minion.handle=20;minion.kind=TargetKind::Minion;minion.team=3;minion.dot_valid.fill(true);minion.dots.fill({.01f,0,1});
+    FocusTarget orb=minion;orb.handle=30;orb.kind=TargetKind::SoulOrb;orb.team=2;orb.dots.fill({0,0,1});choices.focus_targets={minion,orb};
     auto pick=[&](FocusOptions options,bool enemies=false,bool free_move=false,bool visible=false){return select_focus_target(choices,options,enemies,1,free_move,visible,1000,1000,{500,500});};
     check(pick({true,false,false})==&choices.players[0]);check(pick({true,true,false})==&choices.focus_targets[0]);
     check(pick({true,true,true},true)==&choices.focus_targets[1]);check(!pick({false,false,false}));check(!pick({true,true,true},false,false,true));
     choices.focus_targets[0].team=2;check(!pick({false,true,false},true));choices.replay=true;check(pick({false,true,false},true)==&choices.focus_targets[0]);choices.replay=false;
-    choices.players[0].dots={Vec3{0,1,0},Vec3{0,.6f,0},Vec3{0,-.5f,0}};
+    choices.players[0].dots={Vec3{0,1,1},Vec3{0,.6f,1},Vec3{0,-.5f,1}};
     check(pick({true,true,false},false,true)==&choices.players[0]);
     Vec3 focus_world{};float focus_position{};
     check(focus_point(identity,orb,1,true,1000,1000,{500,500},{},focus_world,focus_position)&&focus_world.x==0&&focus_world.y==0);
@@ -361,89 +525,14 @@ check(camera_mode_allowed(false,false,true));
     Matrix perspective{1,0,0,-10,0,1,0,-20,0,0,1,0,0,0,1,-30};Vec3 eye{};
     check(camera_origin(perspective,eye)&&eye.x==10&&eye.y==20&&eye.z==30);
     Matrix zero{};check(!camera_origin(zero,eye));
-    // Area geometry: metric sizes, depth scaling, boundaries and camera-plane clipping.
-    FocusArea center_area{},box_area{FocusAreaMode::TargetBox3D,40,10},circle_area{FocusAreaMode::TargetCircle2D,40,10};
-    check(std::abs(focus_radius_units(box_area)*meters_per_world_unit-10)<.00001f);
-    auto invalid_area=valid_focus_area({static_cast<FocusAreaMode>(99),NAN,INFINITY});
-    check(invalid_area==center_area);
-    check(valid_focus_area({FocusAreaMode::CenterFov,-3,100}).center_percent==1&&valid_focus_area({FocusAreaMode::CenterFov,-3,100}).radius_meters==50);
-    check(center_fov_radius(center_area,1920,1080)==432&&center_fov_radius(center_area,1080,1920)==432);
-    check(focus_area_contains(center_area,identity,{},ScreenPoint{900,500},1000,1000,{500,500}));
-    check(!focus_area_contains(center_area,identity,{},ScreenPoint{901,500},1000,1000,{500,500}));
-    check(!focus_area_contains(center_area,identity,{},ScreenPoint{500,500},NAN,1000,{500,500}));
-    Matrix camera_matrix{1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};Vec3 ray_origin{},ray_direction{};
-    check(focus_camera_ray(camera_matrix,ray_origin,ray_direction)&&ray_direction.z==1&&dot(ray_origin,ray_origin)==0);
-    check(focus_camera_ray(perspective,ray_origin,ray_direction)&&ray_origin.x==10&&ray_origin.y==20&&ray_origin.z==30);
-    Matrix rotated_camera{0,1,0,-20,0,0,1,-30,1,0,0,0,1,0,0,-10};
-    check(focus_camera_ray(rotated_camera,ray_origin,ray_direction)&&ray_origin.x==10&&ray_origin.y==20&&ray_origin.z==30&&ray_direction.x==1);
-    check(!focus_camera_ray(identity,ray_origin,ray_direction));
-    check(focus_ray_box({0,0,0},{0,0,1},{1,0,10},1));
-    check(!focus_ray_box({0,0,0},{0,0,1},{1.01f,0,10},1));
-    check(focus_ray_box({0,0,0},{0,0,1},{0,0,0},1));
-    check(!focus_ray_box({0,0,0},{0,0,1},{0,0,-10},1));
-    check(!focus_ray_box({0,0,0},{0,0,0},{0,0,10},1));
-    check(!focus_ray_box({NAN,0,0},{0,0,1},{0,0,10},1));
-    float near_radius{},far_radius{};auto metric_radius=focus_radius_units(circle_area);
-    check(target_circle_radius(camera_matrix,{0,0,1000},metric_radius,1000,1000,near_radius));
-    check(target_circle_radius(camera_matrix,{0,0,2000},metric_radius,1000,1000,far_radius)&&std::abs(near_radius-2*far_radius)<.0001f);
-    Matrix scaled_matrix=camera_matrix;for(auto& value:scaled_matrix)value*=2;
-    float scaled_radius{};check(target_circle_radius(scaled_matrix,{0,0,1000},metric_radius,1000,1000,scaled_radius)&&std::abs(scaled_radius-near_radius)<.0001f);
-    check(!target_circle_radius(camera_matrix,{0,0,-1000},metric_radius,1000,1000,scaled_radius));
-    auto contains=[&](FocusArea area,Vec3 bone){ScreenPoint aim{};return focus_project(camera_matrix,bone,1000,1000,aim)&&focus_area_contains(area,camera_matrix,bone,aim,1000,1000,{500,500});};
-    check(contains(box_area,{metric_radius,0,1000}));check(!contains(box_area,{metric_radius+1,0,1000}));
-    check(contains(circle_area,{metric_radius-1,0,1000}));check(!contains(circle_area,{metric_radius+1,0,1000}));
-    check(contains(box_area,{metric_radius*.9f,metric_radius*.9f,1000})&&!contains(circle_area,{metric_radius*.9f,metric_radius*.9f,1000}));
-    check(!contains(box_area,{0,0,-10}));
-    auto corners=focus_box_corners({10,20,30},4);check(corners[0].x==6&&corners[0].y==16&&corners[0].z==26&&corners[7].x==14&&corners[7].y==24&&corners[7].z==34);
-    ScreenPoint edge_a{},edge_b{};
-    check(focus_project_segment(camera_matrix,{-20,0,10},{20,0,10},1000,1000,edge_a,edge_b)&&edge_a.x==0&&edge_b.x==1000);
-    check(focus_project_segment(camera_matrix,{0,0,-10},{0,0,10},1000,1000,edge_a,edge_b)&&edge_a.x==500&&edge_b.x==500);
-    check(!focus_project_segment(camera_matrix,{0,0,-20},{0,0,-10},1000,1000,edge_a,edge_b));
-    check(!focus_project_segment(camera_matrix,{20,0,10},{30,0,10},1000,1000,edge_a,edge_b));
-    check(focus_project(camera_matrix,{2000,0,1000},1000,1000,edge_a)&&edge_a.x==1500);
-    check(!focus_project(camera_matrix,{0,0,-1000},1000,1000,edge_a));
-    // Distance first, lower raw HP on a distance tie, and uniform random exact ties.
-    Snapshot overlap;overlap.matrix=camera_matrix;overlap.time=100;
-    auto make_target=[](uint32_t handle,Vec3 at,int health){Player p;p.handle=handle;p.health=health;p.maximum=1000;p.dot_valid.fill(true);p.dots.fill(at);return p;};
-    overlap.players={make_target(100,{100,0,1000},500),make_target(200,{-100,0,1000},100)};
-    std::mt19937 test_random(1928);
-    auto area_pick=[&](FocusArea area=FocusArea{}){return select_focus_target(overlap,{true,false,false},false,1,false,false,1000,1000,{500,500},area,&test_random);};
-    check(area_pick()->handle==200);overlap.players[0].health=10;check(area_pick()->handle==100);
-    overlap.players[0].dots.fill({101,0,1000});check(area_pick()->handle==200);
-    overlap.players[0].dots.fill({100,0,1000});overlap.players[0].health=100;
-    int first_wins{},second_wins{};for(int i=0;i<256;++i){auto result=area_pick();if(result&&result->handle==100)++first_wins;else if(result&&result->handle==200)++second_wins;}
-    check(first_wins>90&&first_wins<166&&first_wins+second_wins==256);
-    overlap.players[0].maximum=0;check(area_pick()->handle==200);overlap.players[0].maximum=1000;
-    overlap.players[0].dots.fill({0,0,-1000});check(area_pick(box_area)->handle==200);
-    overlap.players[0].dots.fill({1000,0,5000});overlap.players[1].dots.fill({0,0,-1000});
-    check(area_pick(center_area)->handle==100&&!area_pick(box_area)&&!area_pick(circle_area));
-    overlap.players[0].dots.fill({metric_radius*.9f,metric_radius*.9f,1000});
-    check(area_pick(box_area)->handle==100&&!area_pick(circle_area));
-    // Held selection retries after an empty acquisition, remains stable on ties,
-    // and stops/reacquires when the region or full entity handle becomes invalid.
-    ReplayCamera area_camera;
-    auto choose_area=[&](FocusArea area=FocusArea{FocusAreaMode::TargetBox3D,40,10}){return area_camera.choose(overlap,{true,false,false},false,1,false,false,area,1000,1000,{500,500},double(overlap.time),&test_random);};
-    overlap.players[0].dots.fill({1000,0,5000});check(!choose_area()&&area_camera.lost);
-    overlap.time=101;overlap.players[0].dots.fill({100,0,1000});check(choose_area()->handle==100&&!area_camera.lost);
-    overlap.players[1].dots.fill({-100,0,1000});
-    for(int i=0;i<128;++i){++overlap.time;check(choose_area()->handle==100);}
-    ++overlap.time;overlap.players[0].dots.fill({1000,0,5000});check(choose_area()->handle==200);
-    ++overlap.time;overlap.players[1].dots.fill({1000,0,5000});check(!choose_area()&&area_camera.target==0);
-    ++overlap.time;overlap.players[1].handle=0x100c8;overlap.players[1].dots.fill({100,0,1000});check(choose_area()->handle==0x100c8);
-    area_camera.release();check(!area_camera.engaged&&!area_camera.target&&!area_camera.point_valid);
-    ++overlap.time;check(choose_area()->handle==0x100c8);++overlap.time;check(choose_area({FocusAreaMode::TargetBox3D,40,.1f})==nullptr);
-    Settings area_settings;area_settings.focus_area=circle_area;area_settings.focus_area.radius_meters=7.25f;area_settings.show_focus_area={true,false,true};area_settings.focus_visuals=false;
-    auto area_settings_path=executable_directory()/L"focus-settings-test.ini";save(area_settings,area_settings_path);auto restored=load(area_settings_path);
-    check(restored.focus_area==area_settings.focus_area&&restored.show_focus_area==area_settings.show_focus_area&&!restored.focus_visuals);
-    {std::ofstream bad(area_settings_path);bad<<"focus_area_mode=99\nfocus_fov_percent=-5\nfocus_radius_meters=999\n";}
-    restored=load(area_settings_path);check(restored.focus_area.mode==FocusAreaMode::TargetCircle2D&&restored.focus_area.center_percent==1&&restored.focus_area.radius_meters==50);
-    Settings hero_settings;hero_settings.focus_speed=17;hero_settings.sniper_focus_speed=42;hero_settings.sniper_speed_override=false;
+    auto area_settings_path=executable_directory()/L"focus-settings-test.ini";Settings restored;
+    Settings hero_settings;hero_settings.focus_speed=17;hero_settings.vindicta_ult.focus_speed=42;hero_settings.vindicta_ult_override=false;
     save(hero_settings,area_settings_path);restored=load(area_settings_path);
-    check(restored.focus_speed==17&&restored.sniper_focus_speed==42&&!restored.sniper_speed_override);
+    check(restored.focus_speed==17&&restored.vindicta_ult.focus_speed==42&&!restored.vindicta_ult_override);
     {std::ofstream legacy(area_settings_path);legacy<<"focus_speed=19\n";}
-    restored=load(area_settings_path);check(restored.sniper_focus_speed==19&&restored.sniper_speed_override);
+    restored=load(area_settings_path);check(restored.vindicta_ult.focus_speed==19&&restored.vindicta_ult_override);
     {std::ofstream bad(area_settings_path);bad<<"sniper_focus_speed=999\n";}
-    check(load(area_settings_path).sniper_focus_speed==120);
+    check(load(area_settings_path).vindicta_ult.focus_speed==120);
     check(valid_weapon_numbers(25984.3f,60,0,0));
     check(!valid_weapon_numbers(NAN,60,0,0));check(!valid_weapon_numbers(10000,0,0,.1f));
     check(!valid_weapon_numbers(10000,-100,0,0));check(!valid_weapon_numbers(10000,0,3,0));
@@ -520,7 +609,7 @@ struct Surface {
     bool last_presented{};uint64_t busy_presents{};
     bool overlay{}, resized{},dragging{},panel_shader{},glass_shader{};UINT width{},height{};POINT drag_origin{},drag_window{};
     void shutdown() {
-        if(!overlay&&context){solace::glass::cursor_shutdown();solace::rounded_panel::shutdown();solace::snapshot::shutdown();solace::fonts.reset();solace::ui_runtime::clear_animation_states();}
+        if(!overlay&&context){solace::icons::shutdown_textures();solace::glass::cursor_shutdown();solace::rounded_panel::shutdown();solace::snapshot::shutdown();solace::fonts.reset();solace::ui_runtime::clear_animation_states();}
         if(context) {ImGui::SetCurrentContext(context);ImGui_ImplDX11_Shutdown();ImGui_ImplWin32_Shutdown();ImGui::DestroyContext(context);context=nullptr;}
         if(hwnd){DestroyWindow(hwnd);hwnd=nullptr;}
     }
@@ -528,22 +617,53 @@ struct Surface {
 };
 struct Application {
     DataUpdate data_update;
+    SessionMonitor session_monitor;
+    std::filesystem::path reports_directory{config_path().parent_path()/L"reports"};
     std::atomic<unsigned> data_revision{};
     MakcuInput makcu;
+    uint64_t input_backend_generation{};
     ReplayCamera camera;
+    AdaptiveFocus adaptive;
+    X2TargetLock target_lock;
+    target_zone::ZoneOutlineCache zone_outline;
+    RayClick ray_click;
+    AutoParry auto_parry;
     Surface settings_window,bar_window;
     Settings settings=load();
-    bool quit{},show_settings{},diagnostics{};
+    HealthKeyCapture health_key_capture;
+    CameraFocusSettings scoped_controls;
+    bool quit{},show_settings{},diagnostics{},ult_scope_active{},ult_profile_active{},click_ultimate{};
     solace::shell_page menu_page{solace::shell_page::camera};
-    int page{-1},bars{};float page_time{1.f};
+    int page{-1},bars{},hidden_tags{};float page_time{1.f};
     HWND game_hwnd{};
     double target_hz{60},render_fps{};std::string display,frame_status="Refresh pacing";
     std::mutex mutex; Snapshot snapshot;
     std::atomic_bool sampling{true};
     std::atomic<double> sample_hz{60};
     std::atomic<unsigned> read_options{};
-    std::unordered_map<uint32_t,float> displayed;
+    void sync_input_backend() {
+        const auto generation=makcu.backend_generation();
+        if(generation==input_backend_generation)return;
+        makcu.cancel();camera.release();adaptive.release();
+        target_lock.invalidate("Input backend changed / release X2");
+        ray_click.release(makcu,"Input backend changed");auto_parry.cancel(makcu,"Input backend changed");
+        input_backend_generation=generation;
+    }
+    const CameraFocusSettings& focus_profile(const Snapshot& state) {
+        const bool scoped=sniper_profile_active(state.hero,true);
+        const bool use_ult=scoped&&settings.vindicta_ult_override;
+        if(scoped!=ult_scope_active||use_ult!=ult_profile_active) {
+            // Drop selection and queued corrections before changing profiles or shot type.
+            camera.release();adaptive.release();makcu.cancel();ray_click.release(makcu);
+            ult_scope_active=scoped;ult_profile_active=use_ult;
+        }
+        const auto& profile=use_ult?settings.vindicta_ult:static_cast<const CameraFocusSettings&>(settings);
+        if(scoped){scoped_controls=assassinate_controls(profile);return scoped_controls;}
+        return profile;
+    }
     void open_settings() {
+        makcu.cancel();ray_click.release(makcu,"Paused / menu open");
+        target_lock.invalidate("Menu open / release X2");
         show_settings=true;
         ShowWindow(settings_window.hwnd,SW_SHOW);
         ShowWindow(settings_window.hwnd,SW_SHOW);
@@ -560,7 +680,7 @@ struct Application {
     }
     void hide_settings() {
         bool owned_focus=GetForegroundWindow()==settings_window.hwnd;
-        show_settings=false;save(settings);
+        show_settings=false;health_key_capture.cancel();save(settings);
         if(GetCapture()==settings_window.hwnd)ReleaseCapture();
         settings_window.dragging=false;
         ShowWindow(settings_window.hwnd,SW_HIDE);
@@ -600,7 +720,11 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     case WM_SIZE: if(w!=SIZE_MINIMIZED){s->width=LOWORD(l);s->height=HIWORD(l);s->resized=true;} return 0;
     case WM_DPICHANGED: if(!s->overlay) {auto r=reinterpret_cast<RECT*>(l);SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);} return 0;
     case WM_CLOSE: if(!s->overlay)s->app->hide_settings();return 0;
-    case WM_KEYDOWN:if(!s->overlay&&w==VK_ESCAPE){s->app->hide_settings();return 0;}break;
+    case WM_KILLFOCUS:if(!s->overlay&&s->app->health_key_capture.active())s->app->health_key_capture.request_cancel();break;
+    case WM_KEYDOWN:if(!s->overlay&&w==VK_ESCAPE){
+        if(s->app->health_key_capture.active())s->app->health_key_capture.request_cancel();
+        else s->app->hide_settings();return 0;
+    }break;
     case WM_SETCURSOR:
         if(!s->overlay&&LOWORD(l)==HTCLIENT&&solace::glass::enabled()&&solace::glass::cursor_live()) {SetCursor(nullptr);return TRUE;}
         break;
@@ -632,6 +756,7 @@ bool create_surface(Application& app,Surface& s,bool overlay) {
     if(overlay) {ImFontConfig config;config.FontDataOwnedByAtlas=false;io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(solace::geist_semibold.data()),static_cast<int>(solace::geist_semibold.size()),15.f,&config);}
     else {
         solace::ui_runtime::set_scale(float(GetDpiForWindow(s.hwnd))/96,false);solace::fonts.install_kerning();
+        solace::icons::initialize_textures(s.renderer.device(),s.renderer.context());
         solace::font_regular(10);solace::font_regular(12);solace::font_regular(14);solace::font_regular(16);solace::font_semibold(20);
         solace::font_medium(10);solace::font_medium(12);solace::font_medium(14);
         solace::set_dark(app.settings.dark);
@@ -661,23 +786,88 @@ bool end_frame(Surface& s) {
     started=clock_ms();auto result=s.renderer.present(0);s.present_ms=clock_ms()-started;s.last_presented=result==S_OK;
     if(result==DXGI_ERROR_WAS_STILL_DRAWING){++s.busy_presents;return true;}return SUCCEEDED(result);
 }
-void draw_bar(ImDrawList* draw,ScreenPoint p,int health,int maximum,float fill,const Settings& s,float scale) {
-    auto rect=bar_rect(p,s.width,s.height,s.gap,scale);ImVec2 a{rect.left,rect.top},b{rect.right,rect.bottom};
-    draw->AddRectFilled({a.x-1,a.y-1},{b.x+1,b.y+1},IM_COL32(8,9,10,245),3*scale);
-    draw->AddRectFilled(a,b,IM_COL32(28,28,28,230),2*scale);
-    auto ratio=health_fraction(health,maximum);auto color=ratio>0.6f?s.green:ratio>0.3f?s.amber:s.red;
-    fill=std::clamp(fill,0.f,1.f);
-    auto filled=bar_fill(rect,fill);
-    if(fill>0)draw->AddRectFilled({filled.left,filled.top},{filled.right,filled.bottom},ImGui::ColorConvertFloat4ToU32(color),2*scale);
-    if(s.numbers){auto text=std::to_string(health);auto font=ImGui::GetFont();float size=15*scale;auto extent=font->CalcTextSizeA(size,FLT_MAX,0,text.c_str());ImVec2 pos{(a.x+b.x)/2-extent.x/2,a.y-extent.y-3*scale};
+void draw_health_number(ImDrawList* draw,BarRect rect,int health,const Settings& s,float scale) {
+    if(s.numbers){auto text=std::to_string(health);auto font=ImGui::GetFont();float size=15*scale;auto extent=font->CalcTextSizeA(size,FLT_MAX,0,text.c_str());
+        ImVec2 pos{rect.left-extent.x-4*scale,rect.top-2*scale};
         draw->AddText(font,size,{pos.x+1,pos.y+1},IM_COL32(0,0,0,240),text.c_str());draw->AddText(font,size,pos,IM_COL32(242,242,242,255),text.c_str());}
+}
+bool healthbar_world_gap_pixels(const Matrix& matrix,Vec3 edge,float viewport_width,float meters,float& pixels) {
+    if(!std::isfinite(viewport_width)||viewport_width<=0||!std::isfinite(meters)||meters<0)return false;
+    FocusClip clip;if(!focus_clip(matrix,edge,clip)||clip.w<=.001f)return false;
+    const float right_length=std::sqrt(matrix[0]*matrix[0]+matrix[1]*matrix[1]+matrix[2]*matrix[2]);
+    if(!std::isfinite(right_length)||right_length<=1e-8f)return false;
+    // A camera-facing horizontal distance at the leftmost joint's depth.
+    // Use the render projection and the existing game-unit conversion.
+    pixels=(meters/meters_per_world_unit)*(viewport_width*.5f)*right_length/clip.w;
+    return std::isfinite(pixels)&&pixels>=0;
+}
+BarRect vertical_healthbar_rect(BarRect body,float gap) {
+    const float outer_top=std::floor(body.top),outer_bottom=std::max(outer_top+3.f,std::ceil(body.bottom));
+    // Enclose all projected body joints, then leave an exact pixel gap between
+    // the box's left edge and the bar's outer black border. Gap is already in pixels.
+    const float left=std::floor(body.left)-std::round(gap)-2.f;
+    return {left,outer_top+1,left+1,outer_bottom-1};
+}
+bool player_healthbar_rect(const Player& player,const Matrix& matrix,float width,float height,const Settings& s,BarRect& rect,BarRect* bounds=nullptr) {
+    if(player.body_point_count<2||player.body_point_count>player.body_points.size())return false;
+    BarRect body{FLT_MAX,FLT_MAX,-FLT_MAX,-FLT_MAX};Vec3 left_edge{};
+    for(size_t i=0;i<player.body_point_count;++i) {
+        ScreenPoint point;if(!project(matrix,player.body_points[i],width,height,point))return false;
+        if(point.x<body.left){body.left=point.x;left_edge=player.body_points[i];}
+        body.right=std::max(body.right,point.x);
+        body.top=std::min(body.top,point.y);body.bottom=std::max(body.bottom,point.y);
+    }
+    if(body.bottom<=body.top||body.right<0||body.left>width||body.bottom<0||body.top>height)return false;
+    float gap{};if(!healthbar_world_gap_pixels(matrix,left_edge,width,s.healthbar_box_gap_meters,gap))return false;
+    if(bounds)*bounds={std::floor(body.left),std::floor(body.top),std::ceil(body.right),std::ceil(body.bottom)};
+    rect=vertical_healthbar_rect(body,gap);return true;
+}
+void draw_vertical_bar(ImDrawList* draw,BarRect rect,int health,int maximum,const Settings& s,float scale) {
+    // One integer-aligned green column with a one-pixel opaque black border.
+    draw->AddRectFilled({rect.left-1,rect.top-1},{rect.right+1,rect.bottom+1},IM_COL32(0,0,0,255));
+    const float ratio=health_fraction(health,maximum),length=rect.bottom-rect.top;
+    const float pixels=ratio>0?std::max(1.f,std::round(length*ratio)):0.f;
+    if(pixels>0)draw->AddRectFilled({rect.left,rect.bottom-pixels},{rect.right,rect.bottom},IM_COL32(0,255,0,255));
+    draw_health_number(draw,rect,health,s,scale);
 }
 void draw_dot(ImDrawList* draw,ScreenPoint p,int index,float scale) {
     constexpr ImU32 colors[]={IM_COL32(245,245,245,255),IM_COL32(56,205,239,255),IM_COL32(255,181,61,255)};
     draw->AddCircleFilled({p.x,p.y},5*scale,IM_COL32(8,9,10,240),16);
     draw->AddCircleFilled({p.x,p.y},3.5f*scale,colors[index],16);
 }
+bool enemy_visual_visibility_allows(const Snapshot& snapshot,const Player& player,bool hide_when_visible) {
+    if(!hide_when_visible)return true;
+    if(!snapshot.visibility||!snapshot.camera_valid||player.visible
+        ||std::none_of(player.dot_valid.begin(),player.dot_valid.end(),[](bool valid){return valid;}))return false;
+    // Treat an exposed hitbox as visible even if all three anchor points are blocked.
+    return std::none_of(player.hitboxes.begin(),player.hitboxes.end(),[](const auto& box){return box.visibility_known&&box.visible;});
+}
+bool hidden_enemy_tag_eligible(const Snapshot& snapshot,const Player& player,bool hide_when_visible=true) {
+    return enemy_teams(snapshot.local_team,player.team)&&player.health>0&&player.feet_valid&&!player.hero_name.empty()
+        &&enemy_visual_visibility_allows(snapshot,player,hide_when_visible);
+}
+bool draw_hidden_enemy_tag(ImDrawList* draw,const Snapshot& snapshot,const Player& player,float width,float height,const Settings& settings,float scale) {
+    if(!hidden_enemy_tag_eligible(snapshot,player,settings.hide_visible_enemy_tags)||width<80*scale||height<40*scale)return false;
+    ScreenPoint feet;
+    if(!project(snapshot.matrix,player.feet,width,height,feet))return false;
+    auto font=ImGui::GetFont();const float size=13*scale,padding=10*scale;
+    const auto text_size=font->CalcTextSizeA(size,FLT_MAX,0,player.hero_name.c_str());
+    const float tag_width=std::min(text_size.x+padding*2,width-8*scale),tag_height=text_size.y+10*scale;
+    const ImVec2 at{std::clamp(feet.x-tag_width*.5f,4*scale,width-4*scale-tag_width),feet.y+8*scale};
+    const ImVec2 end{at.x+tag_width,at.y+tag_height};
+    if(end.y>height-4*scale)return false;
+    const float opacity=settings.transparent_frame?settings.frame_opacity:1.f,rounding=8*scale;
+    draw->AddRectFilled(at+ImVec2{0,2*scale},end+ImVec2{0,2*scale},IM_COL32(0,0,0,int(32*opacity)),rounding);
+    // The overlay has its own D3D device. Use the same frame palette and rounded
+    // shape without binding the menu's device-specific panel shader here.
+    draw->AddRectFilled(at,end,solace::mo::with_alpha(solace::c_background,opacity),rounding);
+    draw->AddRect(at,end,solace::c_border,rounding,0,scale);
+    const ImVec4 clip{at.x+padding,at.y,end.x-padding,end.y};
+    draw->AddText(font,size,at+ImVec2{padding,5*scale},solace::c_foreground,player.hero_name.c_str(),nullptr,0,&clip);
+    return true;
+}
 void draw_skeleton(ImDrawList* draw,const Player& player,const Matrix& matrix,float width,float height,const Settings& settings,float scale) {
+    if(settings.hide_visible_skeletons&&player.visible)return;
     for(const auto& segment:player.skeleton) {
         ScreenPoint a{},b{};
         if(!project(matrix,segment.a,width,height,a)||!project(matrix,segment.b,width,height,b))continue;
@@ -710,42 +900,97 @@ int draw_hitboxes(ImDrawList* draw,const FocusTarget& player,const Matrix& matri
     }
     return drawn;
 }
-void draw_focus_area(ImDrawList* draw,const Snapshot& snapshot,const Settings& settings,float width,float height,uint32_t selected,float scale) {
+void draw_angular_area(ImDrawList* draw,const Snapshot& snapshot,float radius,float width,float height,ImU32 color,float thickness) {
+    CameraBasis basis;if(!camera_basis(snapshot.matrix,basis))return;
+    const float tangent=std::tan(radius/angular_degrees);constexpr int segments=96;
+    auto world=[&](int i){float a=float(i)*6.28318530718f/segments;return add(basis.origin,add(mul(basis.forward,100),mul(add(mul(basis.right,std::cos(a)),mul(basis.up,std::sin(a))),100*tangent)));};
+    Vec3 previous=world(segments-1);
+    for(int i=0;i<segments;++i){auto next=world(i);ScreenPoint a{},b{};if(focus_project_segment(snapshot.matrix,previous,next,width,height,a,b))draw->AddLine({a.x,a.y},{b.x,b.y},color,thickness);previous=next;}
+}
+int draw_adaptive_solution(ImDrawList* draw,const Snapshot& snapshot,const AdaptiveFocusSolution& solution,float width,float height,float scale) {
+    if(!solution.valid)return 0;
+    for(size_t i=0;i<solution.box_count;++i) {
+        Hitbox box=solution.boxes[i];box.a=add(box.a,solution.lead);box.b=add(box.b,solution.lead);
+        for(auto& corner:box.corners)corner=add(corner,solution.lead);
+        const bool selected=box.source_id==solution.source_id;
+        hitbox_segments(box,[&](Vec3 a,Vec3 b){ScreenPoint x{},y{};if(focus_project_segment(snapshot.matrix,a,b,width,height,x,y))
+            draw->AddLine({x.x,x.y},{y.x,y.y},selected?IM_COL32(255,200,70,150):IM_COL32(70,160,255,75),selected?1.5f*scale:scale);});
+    }
+    ScreenPoint point;if(focus_project(snapshot.matrix,solution.aim_point,width,height,point))
+        draw->AddCircle({point.x,point.y},solution.inside?5*scale:9*scale,solution.inside?IM_COL32(60,220,160,230):IM_COL32(255,200,70,240),24,2*scale);
+    return int(solution.box_count);
+}
+void draw_focus_area(ImDrawList* draw,const Snapshot& snapshot,const CameraFocusSettings& settings,float width,float height,uint32_t selected,float scale,
+    const AdaptiveTargetZone* zone=nullptr,target_zone::ZoneOutlineCache* outline=nullptr) {
     if(!show_focus_area(settings)||width<=0||height<=0)return;
-    const auto area=valid_focus_area(settings.focus_area);ScreenPoint center{width*.5f,height*.5f};
-    if(area.mode==FocusAreaMode::CenterFov) {
-        draw->AddCircle({center.x,center.y},center_fov_radius(area,width,height),IM_COL32(145,210,240,200),96,1.5f*scale);
+    if(settings.adaptive.area==AdaptiveAreaMode::TargetZone) {
+        if(!zone||!zone->valid||!outline)return;
+        const bool retained=selected&&selected==zone->target;
+        if(!outline->prepare(*zone,snapshot.matrix,width,height,retained))return;
+        auto lines=[&](const target_zone::UnionOutline& shape,ImU32 color) {
+            for(const auto& line:shape.segments)draw->AddLine({float(line.a.x),float(line.a.y)},{float(line.b.x),float(line.b.y)},color,scale);
+        };
+        if(retained)lines(outline->retention,IM_COL32(255,200,70,55));
+        lines(outline->activation,retained?IM_COL32(255,200,70,230):IM_COL32(70,155,255,215));
         return;
     }
-    int bone=std::clamp(settings.focus_bone,0,2);
-    FocusOptions options{settings.focus_players,settings.focus_minions,settings.focus_orbs};
-    auto target_area=[&](const FocusTarget& target) {
-        if(!focus_candidate(target,snapshot,options,settings.exclude_teammates)||!target.dot_valid[bone])return;
-        // Rendering uses cached visibility; it does not add per-frame map traces.
-        bool visible=target.dot_visible[bone];
-        if(settings.free_focus)visible=settings.free_focus_mode==FreeMovementMode::Hitboxes&&target.kind!=TargetKind::SoulOrb
-            ?std::any_of(target.hitboxes.begin(),target.hitboxes.end(),[](const auto& box){return box.visibility_known&&box.visible;}):target.visible;
-        if(settings.visible_only&&!visible)return;
-        ScreenPoint anchor;if(!focus_project(snapshot.matrix,target.dots[bone],width,height,anchor))return;
-        auto color=target.handle==selected?IM_COL32(255,200,70,220):IM_COL32(125,195,235,140);
-        if(area.mode==FocusAreaMode::TargetCircle2D) {
-            float radius{};if(!target_circle_radius(snapshot.matrix,target.dots[bone],focus_radius_units(area),width,height,radius))return;
-            float farthest=std::hypot(std::max(std::abs(anchor.x),std::abs(anchor.x-width)),std::max(std::abs(anchor.y),std::abs(anchor.y-height)));
-            float nearest=std::hypot(std::max({-anchor.x,anchor.x-width,0.f}),std::max({-anchor.y,anchor.y-height,0.f}));
-            if(radius>farthest+2*scale||radius<nearest-2*scale)return;
-            draw->AddCircle({anchor.x,anchor.y},radius,color,64,1.5f*scale);
-        }else {
-            auto corners=focus_box_corners(target.dots[bone],focus_radius_units(area));
-            for(int i=0;i<8;++i)for(int bit=1;bit<=4;bit*=2)if(!(i&bit)) {
-                ScreenPoint a{},b{};
-                if(focus_project_segment(snapshot.matrix,corners[i],corners[i|bit],width,height,a,b))draw->AddLine({a.x,a.y},{b.x,b.y},color,1.5f*scale);
-            }
-        }
-    };
-    for(const auto& player:snapshot.players)target_area(player);
-    for(const auto& target:snapshot.focus_targets)target_area(target);
+    draw_angular_area(draw,snapshot,settings.adaptive.radius_degrees,width,height,IM_COL32(90,170,255,190),1.4f*scale);
+    if(selected)draw_angular_area(draw,snapshot,settings.adaptive.radius_degrees*1.3f,width,height,IM_COL32(90,170,255,65),scale);
+    return;
+}
+
+int draw_focus_guide(ImDrawList* draw,const Snapshot& snapshot,const FocusTarget& target,const CameraFocusSettings& focus,
+    const Settings& settings,float width,float height,float scale,bool hitboxes_drawn=false) {
+    if(!focus.focus_visuals||!focus.free_focus||target.kind==TargetKind::SoulOrb
+        ||!focus_candidate(target,snapshot,{focus.focus_players,focus.focus_minions,focus.focus_orbs,focus.strict_enemy_players},focus.exclude_teammates))return 0;
+    if(focus.free_focus_mode==FreeMovementMode::Hitboxes)
+        return hitboxes_drawn?0:draw_hitboxes(draw,target,snapshot.matrix,width,height,settings,scale,{},focus.visible_only);
+    for(int i=0;i<2;++i) {
+        ScreenPoint a{},b{};
+        if(target.dot_valid[i]&&target.dot_valid[i+1]&&(!focus.visible_only||(target.dot_visible[i]&&target.dot_visible[i+1]))
+            &&project(snapshot.matrix,target.dots[i],width,height,a)&&project(snapshot.matrix,target.dots[i+1],width,height,b))
+            draw->AddLine({a.x,a.y},{b.x,b.y},IM_COL32(100,210,230,180),2*scale);
+    }
+    for(int i=0;i<3;++i) {
+        ScreenPoint point{};
+        if(target.dot_valid[i]&&(!focus.visible_only||target.dot_visible[i])&&project(snapshot.matrix,target.dots[i],width,height,point))
+            draw_dot(draw,point,i,scale);
+    }
+    return 0;
 }
 struct PageContext { Application& app; const Snapshot& snapshot; };
+void draw_midboss_hud(ImDrawList* draw,const MidBossState& state,float scale,ImVec2 anchor={24,100}) {
+    const ImVec2 at=anchor*scale,end=at+ImVec2{248*scale,67*scale};
+    const ImU32 accent=state.phase==MidBossPhase::Alive?IM_COL32(70,220,165,255)
+        :state.phase==MidBossPhase::Countdown?(state.remaining<=30?IM_COL32(255,196,75,255):IM_COL32(90,170,255,255))
+        :IM_COL32(160,170,185,255);
+    draw->AddRectFilled(at,end,IM_COL32(15,20,28,222),10*scale);
+    draw->AddRect(at,end,IM_COL32(110,135,165,70),10*scale,0,scale);
+    draw->AddLine(at+ImVec2{1*scale,15*scale},at+ImVec2{1*scale,52*scale},accent,2*scale);
+    draw->AddText(ImGui::GetFont(),14*scale,at+ImVec2{15*scale,13*scale},IM_COL32(230,236,245,255),"MID BOSS");
+    const std::string value=state.phase==MidBossPhase::Countdown?midboss_countdown(state.remaining)
+        :state.phase==MidBossPhase::Alive?"ALIVE":state.phase==MidBossPhase::Due?"DUE":"--:--";
+    auto font=ImGui::GetFont();const auto size=font->CalcTextSizeA(21*scale,FLT_MAX,0,value.c_str());
+    draw->AddText(font,21*scale,{end.x-15*scale-size.x,at.y+10*scale},accent,value.c_str());
+    const char* detail=state.paused?"Paused / game clock stopped":state.phase==MidBossPhase::Countdown?"Until next spawn"
+        :state.phase==MidBossPhase::Alive?"Living boss confirmed":state.phase==MidBossPhase::Due?"Awaiting boss entity":"Spawn data unavailable";
+    draw->AddText(font,12*scale,at+ImVec2{15*scale,43*scale},IM_COL32(160,174,193,255),detail);
+}
+void draw_adaptive_response_info(const Snapshot& snap) {
+    ImGui::TextWrapped("Screen feedback / no calibration required");
+    ImGui::Text("Current view: %.1f x %.1f deg / aspect %.3f",snap.projection.horizontal_fov,snap.projection.vertical_fov,snap.projection.aspect);
+    ImGui::TextWrapped("Uses the current view during zoom, slides and ability FOV changes. Adjust Speed for your mouse sensitivity.");
+}
+void draw_zone_diagnostics(const AdaptiveFocus& focus) {
+    ImGui::TextWrapped("%s",focus.zone_status());
+    if(const auto* zone=focus.zone())ImGui::Text("Height %.1f / padding %.1f / %zu volumes",zone->body_height,zone->padding,zone->activation.size());
+    const auto issues=focus.zone_issues();
+    if(!issues.empty()&&ImGui::TreeNode("zone_issues","Unavailable targets (%zu)",issues.size())) {
+        ImGui::BeginChild("##zone_issue_list",{0,solace::px(150)},true);
+        for(const auto& issue:issues)ImGui::TextWrapped("%s %u: %s",target_kind_name(issue.kind),issue.target,issue.reason);
+        ImGui::EndChild();ImGui::TreePop();
+    }
+}
 void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* context) {
     auto& data=*static_cast<PageContext*>(context);auto& app=data.app;const auto& snap=data.snapshot;
     using namespace solace;
@@ -754,106 +999,115 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
     float reveal=mo::EASE_OUT(std::clamp(app.page_time/.22f,0.f,1.f));alpha*=reveal;
     ImVec2 origin=body.Min+px(0.f,8.f*(1-reveal));auto dl=ImGui::GetWindowDrawList();
     auto text=[&](ImVec2 at,const char* label,bool muted=false,float size=16.f){draw_text(dl,font_semibold(size),at,mo::with_alpha(muted?c_muted_foreground:c_foreground,alpha),label);};
-    draw_text_tracked(dl,font_semibold(24),origin,mo::with_alpha(c_foreground,alpha),page==shell_page::camera?"Camera Focus":page==shell_page::health?"Health bars":"Connection",px(-.4f));
+    draw_text_tracked(dl,font_semibold(24),origin,mo::with_alpha(c_foreground,alpha),page==shell_page::camera?"Camera Focus":page==shell_page::vindicta_ult?"Vindicta Ultimate":page==shell_page::health?"Health bars":page==shell_page::test?"Diagnostics":page==shell_page::auto_click?"Auto Click":page==shell_page::auto_parry?"Auto Parry":"Connection",px(-.4f));
     auto card=[&](ImRect box,const char* title,icons::id icon){
         rounded_panel::draw(dl,box.Min,box.Max,mo::with_alpha(c_card,(app.settings.transparent_frame?1.f:.72f)*alpha),px(16));
-        dl->AddRect(box.Min+px(.5f,.5f),box.Max-px(.5f,.5f),mo::with_alpha(c_border,alpha),px(16),px(1));
+        dl->AddRect(box.Min+px(.5f,.5f),box.Max-px(.5f,.5f),mo::with_alpha(c_border,alpha),px(16),0,px(1));
         icons::draw(icon,dl,box.Min+px(20,20),px(16),mo::with_alpha(c_muted_foreground,alpha));
         draw_text_tracked(dl,font_semibold(12),box.Min+px(46,21),mo::with_alpha(c_muted_foreground,alpha),title,px(.8f));
     };
     bool changed=false;
     ui_runtime::push_font(font_semibold(16));ImGui::PushStyleColor(ImGuiCol_Text,ImGui::ColorConvertU32ToFloat4(c_foreground));
     if(page==shell_page::health) {
-        float left=body.GetWidth()*.58f,gap=px(16),right=body.GetWidth()-left-gap;
-        ImRect controls(origin+px(0,70),origin+ImVec2(left,px(494)));
-        ImRect preview({controls.Max.x+gap,controls.Min.y},{body.Max.x,controls.Min.y+px(218)});
-        ImRect effects({preview.Min.x,preview.Max.y+gap},{body.Max.x,controls.Max.y});
-        card(controls,"DISPLAY",icons::id::eye);card(preview,"LIVE PREVIEW",icons::id::target);card(effects,"MARKERS & EFFECTS",icons::id::sparkles);
-        auto toggle=[&](const char* id,ImVec2 pos,const char* title,bool& value,float width){
-            text(pos,title);
-            changed|=switch_toggle(id,{pos.x+width-px(switch_w),pos.y+px(3)},&value);
-        };
-        auto pos=controls.Min+px(20,56);float inner=left-px(40);
-        toggle("draw_health",pos,"Health bars",app.settings.enabled,inner);
-        toggle("show_numbers",pos+px(0,32),"Health numbers",app.settings.numbers,inner);
-        toggle("exclude_teammates",pos+px(0,64),"Enemies only",app.settings.exclude_teammates,inner);
-        toggle("skeletons",pos+px(0,96),"Skeletons",app.settings.skeletons,inner);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Bone segments: visible blue, blocked purple.\nSkeletons show both states; Visible only still gates health bars and focus.\nGray means no collision mesh / camera data.");
-        toggle("hitboxes",pos+px(0,128),"Hitboxes",app.settings.hitboxes,inner);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Model hitboxes follow animated bones: boxes, spheres and capsules.\nVisible/blocked colors below also apply here; gray means visibility is unknown.\nLike Skeletons, both visibility states are shown.");
-        toggle("visible_only",pos+px(0,160),"Visible only",app.settings.visible_only,inner);
-        auto slider=[&](const char* id,const char* title,float& value,float low,float high,float y){
-            auto at=controls.Min+px(20,y);text(at,title);auto number=std::to_string(int(value))+" px";
-            draw_text(dl,font_semibold(14),{controls.Max.x-px(20)-text_width(font_semibold(14),number.c_str()),at.y},mo::with_alpha(c_foreground,alpha),number.c_str());
-            changed|=range_slider(id,at+px(0,19),inner,&value,low,high);
-        };
-        slider("width","Width",app.settings.width,40,200,260);slider("height","Height",app.settings.height,3,16,304);slider("gap","Head gap",app.settings.gap,2,40,348);
-        text(controls.Min+px(20,395),"Health colors",true,12);
-        ImGui::SetCursorScreenPos({controls.Max.x-px(138),controls.Min.y+px(390)});
-        changed|=ImGui::ColorEdit3("##healthy",&app.settings.green.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);ImGui::SameLine();
-        changed|=ImGui::ColorEdit3("##low",&app.settings.amber.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);ImGui::SameLine();
-        changed|=ImGui::ColorEdit3("##critical",&app.settings.red.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);
-        ImVec2 centre{preview.GetCenter().x,preview.Min.y+px(100)};
-        dl->PushClipRect(preview.Min+px(8,44),{preview.Max.x-px(8),preview.Min.y+px(178)},true);
-        auto silhouette=mo::with_alpha(c_muted_foreground,.22f*alpha);
-        dl->AddCircleFilled(centre,px(15),silhouette,40);
-        dl->AddRectFilled(centre+px(-27,24),centre+px(27,65),silhouette,px(16));
-        bool live=!snap.players.empty()&&snap.players.front().maximum>0;
-        int health=live?snap.players.front().health:740,maximum=live?snap.players.front().maximum:1000;
-        if(app.settings.skeletons) {
-            auto color=ImGui::ColorConvertFloat4ToU32(app.settings.skeleton_visible);
-            static const std::vector<std::string> names={"pelvis","spine_2","neck","head","head_end","clavicle_L","arm_upper_L","arm_lower_L","hand_L","clavicle_R","arm_upper_R","arm_lower_R","hand_R","leg_upper_L","leg_lower_L","ankle_L","leg_upper_R","leg_lower_R","ankle_R"};
-            static const auto edges=skeleton_edges(names,{-1,0,1,2,3,1,5,6,7,1,9,10,11,0,13,14,0,16,17});
-            constexpr std::array<ImVec2,19> joints={{{0,61},{0,38},{0,18},{0,0},{0,-12},{-16,28},{-26,30},{-35,50},{-38,69},{16,28},{26,30},{35,50},{38,69},{-13,64},{-19,78},{-20,90},{13,64},{19,78},{20,90}}};
-            for(auto [a,b]:edges)dl->AddLine(centre+px(joints[a].x,joints[a].y),centre+px(joints[b].x,joints[b].y),color,px(1.5f));
-        }
-        if(app.settings.hitboxes) {
-            Player example;
-            for(const auto& model:std::array<ModelHitbox,4>{{{{0,-5,0},{0,3,0},10,-1,1,HitboxShape::Capsule},{{0,29,0},{0,51,0},17,-1,2,HitboxShape::Capsule},{{-24,30,0},{-34,61,0},6,-1,4,HitboxShape::Capsule},{{24,30,0},{34,61,0},6,-1,5,HitboxShape::Capsule}}}) {
-                Hitbox box;if(world_hitbox(model,{0,0,0,1,0,0,0,1},box)){box.visibility_known=box.visible=true;example.hitboxes.push_back(box);}
+        text({body.Max.x-px(354),origin.y+px(6)},"Hold to display",true,14);
+        changed|=switch_toggle("health_visuals_hold",{body.Max.x-px(218),origin.y},&app.settings.health_visuals.hold_only);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Hold the bound key to show all Health bars features: bars, numbers, skeletons, hitboxes, hero tags and the debug box.");
+        const auto key_label=health_visuals_key_name(app.settings.health_visuals.key);
+        ImGui::SetCursorScreenPos({body.Max.x-px(148),origin.y-px(1)});
+        if(ImGui::Button(("Key: "+key_label).c_str(),px(148,30))){app.health_key_capture.begin();ImGui::OpenPopup("Health display key");}
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Click to bind a keyboard key or mouse button. Default: H. Escape and Insert are reserved.");
+        if(ImGui::BeginPopup("Health display key")) {
+            ImGui::TextUnformatted("Release held keys, then press a key or mouse button.");
+            ImGui::TextUnformatted("Escape cancels. Insert closes the menu.");
+            if(GetForegroundWindow()!=app.settings_window.hwnd){app.health_key_capture.cancel();ImGui::CloseCurrentPopup();}
+            else {
+                const int key=app.health_key_capture.poll();
+                if(key>0){app.settings.health_visuals.key=key;changed=true;ImGui::CloseCurrentPopup();}
+                else if(key<0)ImGui::CloseCurrentPopup();
             }
-            Matrix projection{1.f/100,0,0,0,0,-1.f/100,0,0,0,0,0,0,0,0,0,1};
-            draw_hitboxes(dl,example,projection,px(200),px(200),app.settings,ui_runtime::scale,centre-px(100,100));
+            ImGui::EndPopup();
         }
-        if(app.settings.enabled)draw_bar(dl,{centre.x,centre.y-px(22)},health,maximum,health_fraction(health,maximum),app.settings,ui_runtime::scale);
-        if(app.settings.head_dot)draw_dot(dl,{centre.x,centre.y},0,ui_runtime::scale);
-        if(app.settings.body_dot)draw_dot(dl,{centre.x,centre.y+px(38)},1,ui_runtime::scale);
-        if(app.settings.pelvis_dot)draw_dot(dl,{centre.x,centre.y+px(61)},2,ui_runtime::scale);
-        dl->PopClipRect();
-        ImGui::SetCursorScreenPos(preview.Min+px(20,186));
+        if(!ImGui::IsPopupOpen("Health display key"))app.health_key_capture.cancel();
+        const float gap=px(16),column=(body.GetWidth()-gap)*.5f;
+        ImRect controls(origin+px(0,60),{body.Max.x,origin.y+px(244)});
+        ImRect geometry(origin+px(0,256),origin+ImVec2(column,px(480)));
+        ImRect tags({geometry.Max.x+gap,geometry.Min.y},{body.Max.x,origin.y+px(420)});
+        card(controls,"HEALTH BARS",icons::id::eye);
+        card(geometry,"SKELETONS & HITBOXES",icons::id::sparkles);
+        card(tags,"HERO NAME TAGS",icons::id::user);
+        auto toggle=[&](const ImRect& box,float y,const char* id,const char* title,bool& value) {
+            text(box.Min+px(20,y+5),title,false,14);
+            changed|=switch_toggle(id,{box.Max.x-px(20+switch_w),box.Min.y+px(y)},&value);
+        };
+        ImRect left=controls,right=controls;left.Max.x=controls.GetCenter().x-gap*.5f;right.Min.x=controls.GetCenter().x+gap*.5f;
+        toggle(left,48,"draw_health","Health bars",app.settings.enabled);
+        toggle(left,90,"show_numbers","Health numbers",app.settings.numbers);
+        ImGui::BeginDisabled(!app.settings.enabled);
+        toggle(left,132,"hide_visible_healthbars","Hide when visible",app.settings.hide_visible_healthbars);
+        ImGui::EndDisabled();
+        char distance[32]{};snprintf(distance,sizeof(distance),"%.2f m",app.settings.healthbar_box_gap_meters);
+        text(right.Min+px(20,50),"Box gap",true,14);
+        text({right.Max.x-px(20)-text_width(font_semibold(14),distance),right.Min.y+px(50)},distance,false,14);
+        changed|=range_slider("healthbar_box_gap_meters",right.Min+px(20,70),right.GetWidth()-px(40),&app.settings.healthbar_box_gap_meters,0,2);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("World distance from the body box's left edge to the bar. The gap projects through the current camera view.");
+        toggle(right,132,"healthbar_debug_box","Debug placement box",app.settings.healthbar_debug_box);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Draw the exact projected bone box used to place the health bar. Works with health bars disabled.");
+        toggle(geometry,46,"skeletons","Skeletons",app.settings.skeletons);
+        ImGui::BeginDisabled(!app.settings.skeletons);
+        toggle(geometry,82,"hide_visible_skeletons","Hide visible skeletons",app.settings.hide_visible_skeletons);
+        ImGui::EndDisabled();
+        toggle(geometry,118,"hitboxes","Hitboxes",app.settings.hitboxes);
+        ImGui::SetCursorScreenPos(geometry.Min+px(20,168));
         constexpr auto color_flags=ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel;
         changed|=ImGui::ColorEdit3("##skeleton_visible",&app.settings.skeleton_visible.x,color_flags);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Visible skeleton / hitbox color");
         ImGui::SameLine();ImGui::TextUnformatted("Visible");ImGui::SameLine();
         changed|=ImGui::ColorEdit3("##skeleton_hidden",&app.settings.skeleton_hidden.x,color_flags);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Blocked skeleton / hitbox color");
         ImGui::SameLine();ImGui::TextUnformatted("Blocked");
-        toggle("head_dot",effects.Min+px(20,44),"Head dot",app.settings.head_dot,right-px(40));
-        toggle("body_dot",effects.Min+px(20,80),"Body dot",app.settings.body_dot,right-px(40));
-        toggle("pelvis_dot",effects.Min+px(20,116),"Pelvis dot",app.settings.pelvis_dot,right-px(40));
-        toggle("glass_cursor",effects.Min+px(20,152),"Glass cursor",app.settings.glass,right-px(40));
-        ImGui::SetCursorScreenPos(origin+px(0,509));
-        auto action=[&](const char* id,const char* label,float width){auto state=ui_runtime::animation_state<stateful_button_state>(ImGui::GetID(id));stateful_button_update(*state,btn_idle,label,ImGui::GetIO().DeltaTime);return stateful_button_draw(id,*state,btn_idle,ImGui::GetCursorScreenPos(),px(width),false);};
-        if(action("defaults","Reset defaults",146)){app.settings=Settings{};set_dark(true);changed=true;}
-        ImGui::SetCursorScreenPos({body.Max.x-px(138),origin.y+px(509)});if(action("close","Close menu",138))app.hide_settings();
-    } else if(page==shell_page::camera) {
-        ImRect status(origin+px(0,60),{body.Max.x,origin.y+px(210)});card(status,"FOCUS INPUT",icons::id::crosshair_simple);
-        badge("input_ready",dl,status.Min+px(20,51),app.makcu.ready()?"Makcu ready":"Waiting for input",app.makcu.ready()?badge_good:badge_warn);
+        toggle(tags,48,"hidden_enemy_tags","Hero name tags",app.settings.hidden_enemy_tags);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Hero names below enemies. Uses Appearance transparency and opacity.");
+        ImGui::BeginDisabled(!app.settings.hidden_enemy_tags);
+        toggle(tags,90,"hide_visible_enemy_tags","Hide when visible",app.settings.hide_visible_enemy_tags);
+        ImGui::EndDisabled();
+        ImGui::SetCursorScreenPos(origin+px(0,522));
+        if(ImGui::SmallButton("Reset all settings")){app.settings=Settings{};set_dark(true);changed=true;}
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Reset every tab, including camera profiles and automation.");
+    } else if(page==shell_page::camera||page==shell_page::vindicta_ult) {
+        const bool ultimate=page==shell_page::vindicta_ult;
+        auto& focus=ultimate?app.settings.vindicta_ult:static_cast<CameraFocusSettings&>(app.settings);
+        if(ultimate)restrict_assassinate_targets(focus);
+        bool adaptive=adaptive_mode(focus);
+        const bool scoped=sniper_profile_active(snap.hero,true);
+        const bool ult_active=scoped&&app.settings.vindicta_ult_override;
+        ImGui::PushID(ultimate?"vindicta_ult":"regular_focus");
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,px(10,6));
+        text({body.Max.x-px(190),origin.y+px(5)},"Camera focus",true,14);
+        changed|=switch_toggle("replay_focus",{body.Max.x-px(48),origin.y},&focus.replay_focus);
+        const char* input_label=app.makcu.label();
+        badge("input_ready",dl,origin+px(0,43),input_label,app.makcu.ready()?badge_good:badge_warn,false,alpha);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",app.makcu.status().c_str());
-        ImGui::SetCursorScreenPos(status.Min+px(180,47));
-        if(ImGui::Button("Hero / abilities",px(140,30)))ImGui::OpenPopup("Hero ability settings");
+        char hero_label[160]{};
+        snprintf(hero_label,sizeof(hero_label),"%s%s",snap.hero.name.empty()?"Waiting for hero":snap.hero.name.c_str(),
+            ultimate?(ult_active?" / Assassinate active":" / Assassinate profile"):ult_active?" / Ultimate profile active":"");
+        dl->PushClipRect(origin+px(0,35),{body.Max.x-px(164),origin.y+px(70)},true);
+        text({origin.x+badge_width(input_label)+px(16),origin.y+px(46)},hero_label,true,14);
+        dl->PopClipRect();
+        ImGui::SetCursorScreenPos({body.Max.x-px(148),origin.y+px(37)});
+        if(ImGui::Button(ultimate?"Profile options":"Hero / abilities",px(148,30)))ImGui::OpenPopup("Hero ability settings");
         ImGui::SetNextWindowSizeConstraints(px(370,0),px(440,FLT_MAX));
         if(ImGui::BeginPopup("Hero ability settings")) {
-            ImGui::Text("Detected hero: %s",snap.hero.name.c_str());
+            ImGui::Text("Detected hero: %s",snap.hero.name.empty()?"Waiting for hero":snap.hero.name.c_str());
             if(snap.hero.valid)ImGui::Text("Hero ID: %d",snap.hero.id);
-            ImGui::TextWrapped("%s",snap.hero.ability_status.c_str());
-            ImGui::Separator();
-            changed|=ImGui::Checkbox("Vindicta sniper speed override",&app.settings.sniper_speed_override);
-            ImGui::BeginDisabled(!app.settings.sniper_speed_override);
-            ImGui::SetNextItemWidth(px(330));
-            changed|=ImGui::SliderFloat("##sniper_focus_speed",&app.settings.sniper_focus_speed,1.f,120.f,"Sniper focus speed: %.0f");
-            ImGui::EndDisabled();
-            ImGui::TextWrapped("Uses this camera-focus speed while Vindicta is scoped with Assassinate. Unscoping or changing hero restores your regular focus speed.");
+            ImGui::TextWrapped("%s",snap.hero.ability_status.c_str());ImGui::Separator();
+            if(ultimate) {
+                changed|=ImGui::Checkbox("Use separate ultimate profile",&app.settings.vindicta_ult_override);
+                ImGui::TextWrapped("Applies while Vindicta is scoped with Assassinate. Assassinate always targets enemy players only.");
+                if(ImGui::Button("Copy regular controls")){focus=assassinate_controls(static_cast<const CameraFocusSettings&>(app.settings));focus.prediction=false;changed=true;}
+                if(ImGui::Button("Reset ultimate controls")){focus=assassinate_controls();changed=true;}
+            }else {
+                changed|=ImGui::Checkbox("Sandbox & bots",&focus.debug_focus);
+                if(ImGui::Button("Open Vindicta Ultimate")){app.menu_page=shell_page::vindicta_ult;ImGui::CloseCurrentPopup();}
+            }
+            if(ImGui::Button("Open Auto Click")){app.click_ultimate=ultimate;app.menu_page=shell_page::auto_click;ImGui::CloseCurrentPopup();}
             ImGui::Separator();
             if(snap.projection.valid) {
                 ImGui::Text("Live view: %.1f x %.1f degrees",snap.projection.horizontal_fov,snap.projection.vertical_fov);
@@ -861,122 +1115,188 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             }else ImGui::TextUnformatted("Waiting for the game's render view");
             ImGui::EndPopup();
         }
-        ImGui::SetCursorScreenPos({status.Max.x-px(305),status.Min.y+px(47)});
-        if(ImGui::Button("Focus area",px(120,30)))ImGui::OpenPopup("Focus area settings");
-        text({status.Max.x-px(165),status.Min.y+px(53)},"Show FOV",true,14);
-        changed|=switch_toggle("show_focus_area",{status.Max.x-px(65),status.Min.y+px(54)},&app.settings.show_focus_area[int(app.settings.focus_area.mode)]);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Draw the current focus area, independently of Focus visuals.\nEach mode remembers its own drawing setting.");
-        ImGui::SetNextWindowSizeConstraints(px(370,0),px(440,FLT_MAX));
-        if(ImGui::BeginPopup("Focus area settings")) {
-            constexpr const char* modes[]={"Center FOV","Target box (3D)","Target circle (2D)"};
-            int mode=int(app.settings.focus_area.mode);
-            ImGui::TextUnformatted("Camera focus area");ImGui::Separator();
-            ImGui::SetNextItemWidth(px(330));
-            if(ImGui::Combo("##focus_area_mode",&mode,modes,3)){app.settings.focus_area.mode=static_cast<FocusAreaMode>(mode);changed=true;}
-            ImGui::SetNextItemWidth(px(330));
-            if(mode==0) {
-                changed|=ImGui::SliderFloat("##focus_fov_percent",&app.settings.focus_area.center_percent,1.f,80.f,"Radius: %.1f%%");
-                ImGui::TextWrapped("Radius as a percentage of the shorter screen dimension.");
-            }else {
-                changed|=ImGui::SliderFloat("##focus_radius_meters",&app.settings.focus_area.radius_meters,.1f,50.f,"Radius: %.1f m");
-                if(mode==1)ImGui::TextWrapped("World-aligned box around the selected bone. The crosshair ray must intersect it.");
-                else ImGui::TextWrapped("Screen circle around the selected bone. Its meter radius is projected at the target's depth.");
-                if(mode==1)ImGui::Text("Full box size: %.1f m per side",app.settings.focus_area.radius_meters*2);
-            }
-            changed|=ImGui::Checkbox("Draw this area",&app.settings.show_focus_area[mode]);
-            ImGui::Separator();
-            ImGui::TextWrapped("Closest to the crosshair wins. Equal distances prefer lower health, then a random target. A valid selection stays locked while held.");
-            ImGui::EndPopup();
+        const float gap=px(16),left=(body.GetWidth()-gap)*.53f;
+        ImRect movement(origin+px(0,80),origin+ImVec2(left,px(ultimate?510.f:354.f)));
+        ImRect prediction({movement.Min.x,origin.y+px(366)},{movement.Max.x,origin.y+px(510)});
+        ImRect targets({movement.Max.x+gap,movement.Min.y},{body.Max.x,origin.y+px(262)});
+        ImRect area({targets.Min.x,origin.y+px(274)},{targets.Max.x,origin.y+px(510)});
+        card(movement,"MOVEMENT",icons::id::crosshair_simple);
+        if(!ultimate)card(prediction,"PREDICTION",icons::id::sparkles);
+        card(targets,"TARGETS",icons::id::user);
+        card(area,"FOCUS AREA",icons::id::target);
+        auto row_combo=[&](const ImRect& box,float y,const char* label,const char* id,int& value,const char* const* options,int count) {
+            text(box.Min+px(20,y+6),label,true,14);
+            const float width=std::min(px(230),box.GetWidth()*.60f);
+            ImGui::SetCursorScreenPos({box.Max.x-px(20)-width,box.Min.y+px(y)});ImGui::SetNextItemWidth(width);
+            return ImGui::Combo(id,&value,options,count);
+        };
+        auto row_toggle=[&](const ImRect& box,float y,const char* label,const char* id,bool& value) {
+            text(box.Min+px(20,y+5),label,false,14);
+            return switch_toggle(id,{box.Max.x-px(20+switch_w),box.Min.y+px(y)},&value);
+        };
+        auto slider=[&](const ImRect& box,float y,const char* label,const char* id,float& value,float low,float high,const char* format) {
+            char value_label[64]{};snprintf(value_label,sizeof(value_label),format,value);
+            text(box.Min+px(20,y),label,true,14);
+            text({box.Max.x-px(20)-text_width(font_semibold(14),value_label),box.Min.y+px(y)},value_label,false,14);
+            return range_slider(id,box.Min+px(20,y+20),box.GetWidth()-px(40),&value,low,high);
+        };
+        constexpr const char* hold_buttons[]={"X1 / X2","Left mouse","X1 only","X2 only","X1 / X2 lock (360 deg)"};int hold=focus.x2_target_lock?4:int(focus.focus_hold_button);
+        if(row_combo(movement,50,"Hold button","##focus_hold_button",hold,hold_buttons,5)){
+            focus.x2_target_lock=hold==4;focus.focus_hold_button=hold==4?FocusHoldButton::SideButtons:static_cast<FocusHoldButton>(hold);changed=true;
         }
-        char hero_label[200]{};
-        snprintf(hero_label,sizeof(hero_label),"Hero: %s%s",snap.hero.name.c_str(),vindicta(snap.hero)?(snap.hero.sniper_valid?(snap.hero.sniper_scoped?"  /  Assassinate scoped":"  /  Assassinate idle"):"  /  Waiting for sniper state"):"");
-        text(status.Min+px(20,88),hero_label,true,14);
-        char area_hint[160]{};
-        if(app.settings.focus_area.mode==FocusAreaMode::CenterFov)snprintf(area_hint,sizeof(area_hint),"Center FOV radius: %.1f%%",app.settings.focus_area.center_percent);
-        else snprintf(area_hint,sizeof(area_hint),"%s around selected bone: %.1f m radius",app.settings.focus_area.mode==FocusAreaMode::TargetBox3D?"3D box":"2D circle",app.settings.focus_area.radius_meters);
-        text(status.Min+px(20,119),area_hint,true,12);
-        text({status.Max.x-px(335),status.Min.y+px(119)},"Hold button",true,12);
-        constexpr const char* hold_buttons[]={"Either side button","Left mouse"};int hold_button=int(app.settings.focus_hold_button);
-        ImGui::SetCursorScreenPos({status.Max.x-px(225),status.Min.y+px(113)});ImGui::SetNextItemWidth(px(205));
-        if(ImGui::Combo("##focus_hold_button",&hold_button,hold_buttons,2)){app.settings.focus_hold_button=static_cast<FocusHoldButton>(hold_button);changed=true;}
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Choose the button to hold for camera focus.\nApplies to selected-bone focus, Free movement V1 and V2.\nOpening the menu or releasing this button stops focus.");
-        auto camera_pos=origin+px(20,236);text(camera_pos,"Camera focus");
-        changed|=switch_toggle("replay_focus",{camera_pos.x+px(150),camera_pos.y+px(3)},&app.settings.replay_focus);
-        text(origin+px(285,236),"Focus visuals",true,14);
-        changed|=switch_toggle("focus_visuals",origin+px(435,239),&app.settings.focus_visuals);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("X1 uses your original speed. X2 has its own speed and takes priority.\nX1 / X2 lock: X1 works normally; X2 acquires one eligible target across 360 degrees and ignores area limits.\nLoss ends that lock until X2 is released and pressed again. Visibility/team/type filters still apply.\nMenu opening, focus loss or stale data also end the current lock.");
+        constexpr const char* movement_modes[]={"Fixed bone","V1: Bone line","Adaptive"};
+        int mode=!focus.free_focus?0:focus.free_focus_mode==FreeMovementMode::Adaptive?2:1;
+        if(row_combo(movement,88,"Movement","##free_focus_mode",mode,movement_modes,3)) {
+            focus.free_focus=mode!=0;if(mode)focus.free_focus_mode=mode==2?FreeMovementMode::Adaptive:FreeMovementMode::BoneLine;changed=true;
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("V1: free along head, body and pelvis.\nAdaptive: permitted regions, screen feedback and automatic prediction.");
+        adaptive=adaptive_mode(focus);
         constexpr const char* bones[]={"Head","Body","Pelvis"};
-        ImGui::SetCursorScreenPos({body.Max.x-px(130),camera_pos.y-px(4)});
-        if(ImGui::Button(bones[app.settings.focus_bone],px(110,30))){app.settings.focus_bone=(app.settings.focus_bone+1)%3;changed=true;}
-        text(origin+px(20,275),"Sandbox & bots",true,14);
-        changed|=switch_toggle("debug_focus",origin+px(170,278),&app.settings.debug_focus);
-        text(origin+px(285,275),"Free movement",true,14);
-        constexpr const char* movement_modes[]={"Off","V1: Bone line","V2: Full hitboxes"};
-        int movement=app.settings.free_focus?int(app.settings.free_focus_mode)+1:0;
-        ImGui::SetCursorScreenPos({body.Max.x-px(225),origin.y+px(269)});ImGui::SetNextItemWidth(px(205));
-        if(ImGui::Combo("##free_focus_mode",&movement,movement_modes,3)) {
-            app.settings.free_focus=movement!=0;
-            if(movement)app.settings.free_focus_mode=static_cast<FreeMovementMode>(movement-1);
-            changed=true;
+        changed|=row_combo(movement,126,adaptive?"Preferred bone":"Target bone","##focus_bone",focus.focus_bone,bones,3);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",adaptive?"Breaks near-ties only. Movement stays free inside every permitted hitbox.":"Choose the target bone. Free movement returns to the nearest permitted point.");
+        if(adaptive) {
+            constexpr const char* regions[]={"Head and torso","Whole body"};int region=int(selectable_adaptive_region(int(focus.adaptive.region)));
+            if(row_combo(movement,164,"Free region","##adaptive_region",region,regions,2)){focus.adaptive.region=selectable_adaptive_region(region);changed=true;}
+        }else {
+            const char* hint=!focus.free_focus?"Focus stays on the selected bone.":"Move freely along the head, body and pelvis line.";
+            dl->PushClipRect(movement.Min+px(20,164),{movement.Max.x-px(20),movement.Min.y+px(198)},true);
+            text(movement.Min+px(20,170),hint,true,12);dl->PopClipRect();
         }
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("V1: nearest point on head -> body -> pelvis.\nV2: move freely inside any animated hitbox, including arms and legs.\nOutside the volume, correct toward its nearest projected edge.\nV2 reads hitboxes even with Hitboxes drawing off; soul orbs use their center.");
-        text(origin+px(20,317),"Focus speed",true,14);
-        auto scoped_speed=sniper_speed_active(snap.hero,app.settings.sniper_speed_override);
-        auto speed_label=std::to_string(int(hero_focus_speed(snap.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed)))+(scoped_speed?" (sniper)":"");
-        text({body.Max.x-px(scoped_speed?130.f:45.f),origin.y+px(317)},speed_label.c_str(),false,14);
-        changed|=range_slider("focus_speed",origin+px(20,341),body.GetWidth()-px(40),&app.settings.focus_speed,1.f,120.f);
-        text(origin+px(20,379),"Prediction",true,14);
-        changed|=switch_toggle("prediction",origin+px(170,382),&app.settings.prediction);
-        text(origin+px(285,379),"Auto weapon speed",true,14);
-        changed|=switch_toggle("auto_speed",{body.Max.x-px(70),origin.y+px(382)},&app.settings.auto_speed);
-        text(origin+px(20,421),app.settings.auto_speed?"Live primary bullet speed (units/s)":"Manual projectile speed (units/s)",true,12);
-        auto projectile_label=app.settings.auto_speed?(snap.weapon.valid?std::to_string(int(snap.weapon.speed)):"--"):std::to_string(int(app.settings.projectile_speed));
-        text({body.Max.x-px(80),origin.y+px(421)},projectile_label.c_str(),false,14);
-        if(app.settings.auto_speed){
-            char detail[160]{};
-            if(snap.weapon.valid)snprintf(detail,sizeof(detail),"Base %.0f  /  Bonus %+.0f%%  /  Movement inheritance %.2f",snap.weapon.base_speed,snap.weapon.bonus_percent,snap.weapon.inheritance);
-            else snprintf(detail,sizeof(detail),"%s",snap.weapon.status.c_str());
-            text(origin+px(20,453),detail,true,12);
-        }else{
-            changed|=range_slider("projectile_speed",origin+px(20,445),body.GetWidth()-px(40),&app.settings.projectile_speed,1000.f,100000.f);
-            text(origin+px(20,480),"Inherit shooter velocity",true,12);
-            changed|=switch_toggle("inherit_velocity",origin+px(200,480),&app.settings.inherit_velocity);
+        // Default/reset profiles also seed X2 before exposing its slider.
+        sanitize_camera_settings(focus);
+        if(focus.focus_hold_button==FocusHoldButton::LeftMouse) {
+            changed|=slider(movement,210,"Left mouse speed","focus_speed",adaptive?focus.adaptive.speed:focus.focus_speed,1,adaptive?100.f:120.f,"%.0f");
+        }else {
+            ImRect x1=movement,x2=movement;x1.Max.x=movement.GetCenter().x+px(4);x2.Min.x=movement.GetCenter().x-px(4);
+            ImGui::BeginDisabled(focus.focus_hold_button==FocusHoldButton::X2);
+            changed|=slider(x1,210,"X1 speed","focus_speed",adaptive?focus.adaptive.speed:focus.focus_speed,1,adaptive?100.f:120.f,"%.0f");
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Your original saved speed. Used by X1 and left-mouse activation.");
+            ImGui::EndDisabled();ImGui::BeginDisabled(focus.focus_hold_button==FocusHoldButton::X1);
+            changed|=slider(x2,210,"X2 speed","focus_speed_x2",adaptive?focus.adaptive_speed_x2:focus.focus_speed_x2,1,adaptive?140.f:240.f,"%.0f");
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Independent faster option. Starts at roughly twice X1's response; the existing movement limits still apply.");
+            ImGui::EndDisabled();
         }
-        if(app.settings.auto_speed) {
-            char movement_hint[160]{};const char* button=focus_button_label(app.settings.focus_hold_button);
-            if(!app.settings.free_focus)snprintf(movement_hint,sizeof(movement_hint),"Hold %s to focus the selected bone",button);
-            else snprintf(movement_hint,sizeof(movement_hint),"%s: hold %s; move %s",app.settings.free_focus_mode==FreeMovementMode::Hitboxes?"V2":"V1",button,app.settings.free_focus_mode==FreeMovementMode::Hitboxes?"inside target hitboxes":"along the connected bones");
-            text(origin+px(20,480),movement_hint,true,12);
+        if(ultimate) {
+            text(targets.Min+px(20,53),"Enemy players only",false,14);
+            text(targets.Min+px(20,89),"Target types and team filter are fixed",true,12);
+        }else {
+        ui_runtime::push_font(font_semibold(14));
+        const float target_column=(targets.GetWidth()-px(40))/3;
+        auto target_type=[&](int column,const char* label,bool& enabled) {
+            ImGui::SetCursorScreenPos(targets.Min+ImVec2(px(20)+target_column*float(column),px(51)));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,enabled?0.f:px(1));
+            ImGui::PushStyleColor(ImGuiCol_Button,enabled?ImGui::GetStyleColorVec4(ImGuiCol_Button):ImGui::ColorConvertU32ToFloat4(c_background));
+            ImGui::PushStyleColor(ImGuiCol_Border,ImGui::ColorConvertU32ToFloat4(c_border_strong));
+            ImGui::PushStyleColor(ImGuiCol_Text,ImGui::ColorConvertU32ToFloat4(enabled?c_foreground:c_muted_foreground));
+            if(ImGui::Button(label,{target_column-px(column==2?0.f:8.f),px(30)})){enabled=!enabled;changed=true;}
+            ImGui::PopStyleColor(3);ImGui::PopStyleVar();
+        };
+        target_type(0,"Players",focus.focus_players);target_type(1,"Minions",focus.focus_minions);target_type(2,"Soul orbs",focus.focus_orbs);
+        ui_runtime::pop_font();
+        changed|=row_toggle(targets,91,"Enemies only","exclude_teammates",focus.exclude_teammates);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Filters this Camera Focus profile only.");
         }
-        ImGui::SetCursorScreenPos({body.Max.x-px(130),origin.y+px(478)});
-        if(ImGui::Button("Target types",px(110,30)))ImGui::OpenPopup("Focus targets");
-        if(ImGui::BeginPopup("Focus targets")) {
-            changed|=ImGui::Checkbox("Players",&app.settings.focus_players);
-            changed|=ImGui::Checkbox("Minions",&app.settings.focus_minions);
-            changed|=ImGui::Checkbox("Soul orbs",&app.settings.focus_orbs);
-            ImGui::Separator();
-            changed|=ImGui::Checkbox("Enemies only",&app.settings.exclude_teammates);
-            changed|=ImGui::Checkbox("Visible only",&app.settings.visible_only);
-            if(ImGui::IsItemHovered())ImGui::SetTooltip("These filters also apply to health bars and markers.");
-            int minions=0,orbs=0;for(const auto& target:snap.focus_targets)if(target.kind==TargetKind::Minion)++minions;else if(target.kind==TargetKind::SoulOrb)++orbs;
-            ImGui::Separator();ImGui::Text("Available: %zu players / %d minions / %d orbs",snap.players.size(),minions,orbs);
-            ImGui::Text("Hold %s and enter a valid focus area.",focus_button_label(app.settings.focus_hold_button));
+        changed|=row_toggle(targets,127,"Visible only","visible_only",focus.visible_only);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",ultimate?"Only select visible points while the Assassinate profile is active.":"Only select visible focus points for this Camera Focus profile.");
+        int minions=0,orbs=0;for(const auto& target:snap.focus_targets)if(target.kind==TargetKind::Minion)++minions;else if(target.kind==TargetKind::SoulOrb)++orbs;
+        char available[96]{};if(ultimate) {
+            const auto enemies=std::count_if(snap.players.begin(),snap.players.end(),[&](const auto& p){return enemy_teams(snap.local_team,p.team);});
+            snprintf(available,sizeof(available),"%zu enemy players",size_t(enemies));
+        }else snprintf(available,sizeof(available),"%zu players / %d minions / %d orbs",snap.players.size(),minions,orbs);
+        text(targets.Min+px(20,163),available,true,12);
+        constexpr const char* areas[]={"Crosshair angle","Target Zone"};int shape=int(focus.adaptive.area);
+        if(row_combo(area,50,"Area","##focus_area",shape,areas,2)){focus.adaptive.area=static_cast<AdaptiveAreaMode>(shape);changed=true;}
+        const bool zone=focus.adaptive.area==AdaptiveAreaMode::TargetZone;
+        if(zone)changed|=slider(area,96,"Padding","focus_padding",focus.adaptive.padding_percent,0,100,"%.0f%% height");
+        else changed|=slider(area,96,"Radius","focus_radius_degrees",focus.adaptive.radius_degrees,1,25,"%.1f deg");
+        char retention[80]{};
+        if(zone)snprintf(retention,sizeof(retention),"Retention padding: %.1f%% height",focus.adaptive.padding_percent*1.3f);
+        else snprintf(retention,sizeof(retention),"Retention: %.1f deg",focus.adaptive.radius_degrees*1.3f);
+        text(area.Min+px(20,163),retention,true,12);
+        const float area_column=(area.GetWidth()-px(40))/2;
+        const bool zone_area=focus.adaptive.area==AdaptiveAreaMode::TargetZone;
+        text(area.Min+px(20,202),zone_area?"Show zone":"Show FOV",true,14);
+        changed|=switch_toggle("show_focus_area",area.Min+ImVec2(px(20)+area_column-px(switch_w+12),px(196)),zone_area?&focus.adaptive.show_target_zone:&focus.adaptive.show_area);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",zone_area?"Preview the nearest eligible target. Gold marks the retained target; the faint outline is its retention zone.\nPadding controls activation. Free movement still uses the original hitboxes.":"Draw the focus area. Each area mode remembers its drawing setting.");
+        text(area.Min+ImVec2(px(20)+area_column,px(202)),"Focus visuals",true,14);
+        changed|=switch_toggle("focus_visuals",{area.Max.x-px(20+switch_w),area.Min.y+px(196)},&focus.focus_visuals);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Focus visuals: draw the selected point and free-movement geometry.");
+        if(!ultimate) {
+            changed|=row_toggle(prediction,49,"Prediction",adaptive?"adaptive_prediction":"prediction",adaptive?focus.adaptive.prediction:focus.prediction);
+            char prediction_summary[160]{};
+            if(adaptive) {
+                snprintf(prediction_summary,sizeof(prediction_summary),"%s",!focus.adaptive.prediction?"Prediction disabled":scoped?"Assassinate / data-age compensation":snap.weapon.valid?"Automatic / live weapon speed":"Waiting for live weapon data");
+            }else if(focus.auto_speed&&snap.weapon.valid)snprintf(prediction_summary,sizeof(prediction_summary),"Live bullet speed: %.0f units/s",snap.weapon.speed);
+            else snprintf(prediction_summary,sizeof(prediction_summary),focus.auto_speed?"Waiting for live weapon speed":"Manual bullet speed: %.0f units/s",focus.projectile_speed);
+            dl->PushClipRect(prediction.Min+px(20,80),{prediction.Max.x-px(20),prediction.Min.y+px(100)},true);
+            text(prediction.Min+px(20,84),prediction_summary,true,12);dl->PopClipRect();
+            ImGui::SetCursorScreenPos(prediction.Min+px(20,105));
+            if(adaptive) {
+                if(ImGui::Button("Advanced",px(105,30)))ImGui::OpenPopup("Adaptive advanced");
+            }else if(ImGui::Button("Prediction settings",px(180,30)))ImGui::OpenPopup("Prediction settings");
+            ImGui::SetNextWindowSizeConstraints(px(390,0),px(460,FLT_MAX));
+            if(ImGui::BeginPopup("Prediction settings")) {
+                changed|=ImGui::Checkbox("Prediction",&focus.prediction);
+                changed|=ImGui::Checkbox("Auto weapon speed",&focus.auto_speed);
+                if(focus.auto_speed) {
+                    if(snap.weapon.valid) {
+                        ImGui::Text("Live bullet speed: %.0f units/s",snap.weapon.speed);
+                        ImGui::Text("Base %.0f / bonus %+.0f%%",snap.weapon.base_speed,snap.weapon.bonus_percent);
+                        ImGui::Text("Movement inheritance: %.2f",snap.weapon.inheritance);
+                    }else ImGui::TextWrapped("%s",snap.weapon.status.c_str());
+                }else {
+                    ImGui::SetNextItemWidth(px(340));
+                    changed|=ImGui::SliderFloat("##projectile_speed",&focus.projectile_speed,1000.f,100000.f,"Bullet speed: %.0f units/s");
+                    changed|=ImGui::Checkbox("Inherit shooter velocity",&focus.inherit_velocity);
+                }
+                ImGui::EndPopup();
+            }
+        }else {
+            text(movement.Min+px(20,294),"Hitscan / no projectile travel lead",true,12);
+            text(movement.Min+px(20,318),"Sample-age compensation is automatic",true,12);
+            if(adaptive) {
+                ImGui::SetCursorScreenPos(movement.Min+px(20,352));
+                if(ImGui::Button("Advanced response",px(180,30)))ImGui::OpenPopup("Adaptive advanced");
+            }
+        }
+        ImGui::SetNextWindowSizeConstraints(px(390,0),{px(460),ImGui::GetIO().DisplaySize.y-px(48)});
+        if(ImGui::BeginPopup("Adaptive advanced")) {
+            draw_adaptive_response_info(snap);
+            ImGui::Text("X1 response: %.1f ms / X2: %.1f ms",adaptive_response_ms(focus.adaptive.speed),adaptive_response_ms(focus.adaptive_speed_x2));
+            ImGui::Separator();ImGui::SetNextItemWidth(px(340));
+            changed|=ImGui::SliderFloat("##adaptive_max_rate",&focus.adaptive.max_rate,30.f,720.f,"Requested step rate: %.0f deg/s");
+            ImGui::SetNextItemWidth(px(340));changed|=ImGui::SliderFloat("##adaptive_max_acceleration",&focus.adaptive.max_acceleration,300.f,6000.f,"Acceleration: %.0f deg/s2");
+            if(ultimate==app.ult_profile_active) {
+                const auto& solution=app.adaptive.solution;ImGui::Separator();ImGui::TextWrapped("%s",app.adaptive.status.c_str());
+                if(focus.adaptive.area==AdaptiveAreaMode::TargetZone)draw_zone_diagnostics(app.adaptive);
+                ImGui::Text("Region: %s / motion: %s",region_name(solution.region),motion_source_name(solution.motion_source));
+                ImGui::Text("Age: %.1f ms / flight: %.1f ms",solution.data_age_ms,solution.flight_time*1000);ImGui::TextWrapped("%s",solution.prediction_status);
+            }
             ImGui::EndPopup();
         }
-        text(origin+px(20,517),
-             !app.settings.replay_focus ? "Focus disabled"
-             : app.settings.visible_only && !snap.visibility ? "Waiting for map collision mesh"
-             : app.camera.occluded ? "Focus point blocked"
-             : app.camera.input_blocked ? "Input failed; release the hold button to retry"
-             : app.settings.free_focus && app.settings.free_focus_mode==FreeMovementMode::Hitboxes && app.settings.focus_players && std::none_of(snap.players.begin(),snap.players.end(),[](const auto& player){return !player.hitboxes.empty();}) ? "V2 waiting for player hitboxes"
-             : app.camera.lost ? "Hold and move into a valid focus area"
-             : app.settings.prediction
-                ? (app.settings.auto_speed && !snap.weapon.valid
-                    ? "Prediction waiting for live weapon data"
-                    : app.camera.prediction_active
-                        ? "Prediction active"
-                        : "Prediction waiting for valid motion / intercept")
-                : "Prediction off",
-             true, 12);
+        const char* state=ultimate&&!app.settings.vindicta_ult_override?"Ultimate override disabled / enable it in Profile options"
+            :ultimate&&!scoped?"Waiting for Vindicta's Assassinate scope"
+            :!ultimate&&ult_active?"Vindicta Ultimate profile active / editing regular controls"
+            :!focus.replay_focus?"Focus disabled":!app.makcu.ready()?"Waiting for mouse input"
+            :app.target_lock.active()?app.target_lock.status.c_str()
+            :adaptive?app.adaptive.status.c_str()
+            :focus.visible_only&&!snap.visibility?"Waiting for map collision mesh":app.camera.occluded?"Focus point blocked"
+            :app.camera.input_blocked?"Input failed / release the hold button to retry"
+            :app.camera.lost?app.camera.selection_status:scoped?"Assassinate hitscan / projectile prediction off"
+            :focus.prediction?(focus.auto_speed&&!snap.weapon.valid?"Prediction waiting for live weapon data":app.camera.prediction_active?"Prediction active":"Prediction waiting for valid motion / intercept"):"Prediction off";
+        dl->PushClipRect(origin+px(0,522),body.Max,true);text(origin+px(0,526),state,true,12);dl->PopClipRect();
+        ImGui::PopStyleVar();ImGui::PopID();
+    } else if(page==shell_page::auto_click) {
+        changed|=draw_auto_click_settings(static_cast<CameraFocusSettings&>(app.settings),app.settings.vindicta_ult,
+            app.click_ultimate,app.ult_profile_active,app.ray_click,app.makcu,{origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
+    } else if(page==shell_page::auto_parry) {
+        changed|=draw_auto_parry_settings(app.settings.auto_parry,app.auto_parry,snap.parry,
+            {origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
+    } else if(page==shell_page::test) {
+        changed|=draw_session_monitor(app.session_monitor,snap,{origin,origin+body.GetSize()},alpha,
+            app.settings.transparent_frame,app.settings.show_monitor_hud,app.makcu.ready(),app.makcu.status(),
+            app.reports_directory,app.settings_window.hwnd);
     } else {
         ImRect status(origin+px(0,60),{body.Max.x,origin.y+px(187)});card(status,"GAME CONNECTION",icons::id::workflow);        badge("connected",dl,status.Min+px(20,45),snap.pid?"Connected":"Waiting for game",snap.pid?badge_good:badge_warn);
         char timing[160]{};snprintf(timing,sizeof(timing),"%.0f Hz / %.0f FPS / %.3f ms reads / %zu players",app.target_hz,app.render_fps,snap.sample_us/1000,snap.players.size());
@@ -1043,7 +1363,8 @@ void draw_settings(Application& app,const Snapshot& snap) {
             ImGui::Text("Frame opacity  %.0f%%",settings.frame_opacity*100);
             changed|=range_slider("frame_opacity",ImGui::GetCursorScreenPos(),px(248),&settings.frame_opacity,.4f,.9f);
         }
-        ImGui::TextDisabled("Sidebar, header and empty frame");
+        ImGui::TextDisabled("Sidebar, header, empty frame and enemy tags");
+        ImGui::Separator();changed|=ImGui::Checkbox("Mid Boss HUD",&settings.show_midboss_hud);
         ImGui::Separator();changed|=ImGui::Checkbox("Glass cursor",&settings.glass);
         ui_runtime::pop_font();
         if(changed)save(settings);
@@ -1102,6 +1423,63 @@ bool capture(Surface& s,const std::filesystem::path& path,bool require_transpare
     if(FAILED(frame->SetPixelFormat(&format))||format!=GUID_WICPixelFormat32bppBGRA)return false;
     return SUCCEEDED(frame->WritePixels(desc.Height,desc.Width*4,static_cast<UINT>(pixels.size()),pixels.data()))&&SUCCEEDED(frame->Commit())&&SUCCEEDED(encoder->Commit());
 }
+int menu_previews(const std::filesystem::path& directory) {
+    // Render the real menu into hidden surfaces. No game reader, input worker,
+    // serial port, settings write or desktop interaction is used by this path.
+    menu_preview_mode=true;CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    std::filesystem::create_directories(directory);Application app;
+    app.settings=Settings{};app.settings.glass=false;app.settings.transparent_frame=false;
+    app.settings.free_focus=true;app.settings.free_focus_mode=FreeMovementMode::Adaptive;
+    app.settings.auto_click=true;app.settings.auto_click_orbs_only=true;
+    sanitize_camera_settings(app.settings);
+    app.settings.vindicta_ult=assassinate_controls(static_cast<const CameraFocusSettings&>(app.settings));
+    app.settings.skeletons=app.settings.hitboxes=app.settings.hidden_enemy_tags=true;
+    app.ray_click.status="Preview / waiting for a claimable orb";
+    Snapshot snapshot;snapshot.status="Menu preview / no game input";
+    snapshot.hero.valid=true;snapshot.hero.id=3;snapshot.hero.name="Vindicta";snapshot.hero.token="hero_hornet";
+    snapshot.hero.sniper_present=snapshot.hero.sniper_valid=true;snapshot.hero.ability_status="Assassinate idle";
+    snapshot.projection={true,71.1f,43.8f,16.f/9};snapshot.weapon.valid=true;snapshot.weapon.speed=25984;
+    bool ok=create_surface(app,app.settings_window,false);
+    auto render=[&](solace::shell_page page,const wchar_t* name) {
+        app.menu_page=page;app.page=int(page);app.page_time=1.f;
+        for(int i=0;i<16&&ok;++i) {
+            ok=begin_frame(app.settings_window);
+            if(ok) {
+                auto& io=ImGui::GetIO();io.DeltaTime=1.f/30;io.MousePos={-FLT_MAX,-FLT_MAX};
+                for(auto& down:io.MouseDown)down=false;
+                draw_settings(app,snapshot);render_frame(app.settings_window);
+            }
+        }
+        if(ok)ok=capture(app.settings_window,directory/name);
+    };
+    if(ok) {
+        render(solace::shell_page::auto_click,L"auto-click-orbs.png");
+        render(solace::shell_page::camera,L"camera-focus.png");
+        app.settings.x2_target_lock=true;
+        render(solace::shell_page::camera,L"camera-x2-lock.png");
+        app.settings.x2_target_lock=false;
+        app.settings.free_focus=false;
+        render(solace::shell_page::camera,L"camera-focus-fixed.png");
+        app.settings.adaptive.area=AdaptiveAreaMode::TargetZone;
+        render(solace::shell_page::camera,L"camera-focus-zone.png");
+        app.settings.free_focus=true;app.settings.adaptive.area=AdaptiveAreaMode::CrosshairAngle;
+        app.ult_profile_active=true;snapshot.hero.sniper_scoped=true;snapshot.hero.ability_status="Assassinate scoped";
+        render(solace::shell_page::vindicta_ult,L"vindicta-ultimate.png");
+        app.settings.vindicta_ult.x2_target_lock=true;
+        render(solace::shell_page::vindicta_ult,L"vindicta-x2-lock.png");
+        app.settings.vindicta_ult.x2_target_lock=false;
+        app.settings.vindicta_ult.free_focus=false;
+        render(solace::shell_page::vindicta_ult,L"vindicta-ultimate-fixed.png");
+        app.ult_profile_active=false;snapshot.hero.sniper_scoped=false;
+        render(solace::shell_page::health,L"health-bars.png");
+        app.settings.healthbar_debug_box=true;
+        render(solace::shell_page::health,L"health-bars-debug.png");
+        render(solace::shell_page::auto_parry,L"auto-parry.png");
+        app.settings.auto_click_orbs_only=false;app.ray_click.status="Preview / hold either side button";
+        render(solace::shell_page::auto_click,L"auto-click-players.png");
+    }
+    app.settings_window.shutdown();CoUninitialize();return ok?0:2;
+}
 int render_test() {
     CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     Application app;app.settings=Settings{};
@@ -1124,7 +1502,6 @@ int render_test() {
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;ImGui::GetIO().MousePos={960.f+float(i),500.f};draw_settings(app,s);render_frame(app.settings_window);}}
         if(ok)ok=solace::snapshot::backdrop_ready()&&solace::glass::cursor_live();
         if(ok)ok=capture(app.settings_window,executable_directory()/L"settings-preview.png",true);
-        app.settings.head_dot=app.settings.body_dot=app.settings.pelvis_dot=true;
         app.settings.skeletons=app.settings.hitboxes=true;
         for(int i=0;i<20&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
         if(ok)ok=capture(app.settings_window,executable_directory()/L"marker-settings-preview.png",true);
@@ -1165,7 +1542,7 @@ int render_test() {
         }
         if(ok)ok=ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&capture(app.settings_window,executable_directory()/L"focus-area-settings-preview.png",true);
         for(int mode=1;mode<3&&ok;++mode) {
-            app.settings.focus_area.mode=static_cast<FocusAreaMode>(mode);
+            app.settings.adaptive.area=static_cast<AdaptiveAreaMode>(mode%2);
             for(int i=0;i<8&&ok;++i){ok=begin_frame(app.settings_window);if(ok){ImGui::GetIO().DeltaTime=1.f/60;draw_settings(app,s);render_frame(app.settings_window);}}
             if(ok)ok=capture(app.settings_window,executable_directory()/(mode==1?L"focus-box-settings-preview.png":L"focus-circle-settings-preview.png"),true);
         }
@@ -1187,9 +1564,9 @@ int render_test() {
         if(ok)ok=ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)
             &&capture(app.settings_window,executable_directory()/L"appearance-settings-preview.png",true);
         SetWindowPos(app.bar_window.hwnd,nullptr,0,0,320,160,SWP_NOACTIVATE|SWP_NOZORDER);
-        for(int i=0;i<3&&ok;++i){ok=begin_frame(app.bar_window);if(ok){draw_bar(ImGui::GetBackgroundDrawList(),{160,110},740,1000,.74f,Settings{},1);render_frame(app.bar_window);}}
+        for(int i=0;i<3&&ok;++i){ok=begin_frame(app.bar_window);if(ok){draw_vertical_bar(ImGui::GetBackgroundDrawList(),vertical_healthbar_rect({140,10,180,110},8),740,1000,Settings{},1);render_frame(app.bar_window);}}
         if(ok)ok=capture(app.bar_window,executable_directory()/L"bar-preview.png",true);
-        if(ok){ok=begin_frame(app.bar_window);if(ok){Settings demo;draw_bar(ImGui::GetBackgroundDrawList(),{170,90},740,1000,.74f,demo,1);for(int i=0;i<3;++i)draw_dot(ImGui::GetBackgroundDrawList(),{125,55.f+35.f*i},i,1);render_frame(app.bar_window);ok=capture(app.bar_window,executable_directory()/L"markers-preview.png",true);}}
+        if(ok){ok=begin_frame(app.bar_window);if(ok){Settings demo;draw_vertical_bar(ImGui::GetBackgroundDrawList(),vertical_healthbar_rect({150,10,190,90},8),740,1000,demo,1);for(int i=0;i<3;++i)draw_dot(ImGui::GetBackgroundDrawList(),{125,55.f+35.f*i},i,1);render_frame(app.bar_window);ok=capture(app.bar_window,executable_directory()/L"markers-preview.png",true);}}
         SetWindowPos(app.bar_window.hwnd,nullptr,0,0,640,360,SWP_NOACTIVATE|SWP_NOZORDER);
         Player shapes;
         for(auto model:std::array<ModelHitbox,3>{{{{-18,-26,-12},{18,26,12},0,-1,2,HitboxShape::Box},{{0,-30,0},{0,30,0},15,-1,3,HitboxShape::Capsule},{{0,0,0},{0,0,0},25,-1,1,HitboxShape::Sphere}}}) {
@@ -1201,9 +1578,9 @@ int render_test() {
         if(ok)ok=capture(app.bar_window,executable_directory()/L"hitboxes-preview.png",true);
         Snapshot areas;areas.matrix={.5625f,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};areas.players.resize(2);
         for(int i=0;i<2;++i){auto& target=areas.players[i];target.handle=uint32_t(i+1);target.dot_valid.fill(true);target.dots.fill({i==0?250.f:-650.f,0,i==0?1800.f:3200.f});}
-        Settings area_demo;area_demo.show_focus_area.fill(true);area_demo.focus_visuals=false;area_demo.visible_only=false;
+        Settings area_demo;area_demo.adaptive.show_area=area_demo.adaptive.show_target_zone=true;area_demo.focus_visuals=false;area_demo.visible_only=false;
         for(int mode=0;mode<3&&ok;++mode) {
-            area_demo.focus_area.mode=static_cast<FocusAreaMode>(mode);
+            area_demo.adaptive.area=static_cast<AdaptiveAreaMode>(mode%2);
             for(int i=0;i<3&&ok;++i){ok=begin_frame(app.bar_window);if(ok){auto draw=ImGui::GetBackgroundDrawList();draw_focus_area(draw,areas,area_demo,640,360,1,1);draw->AddLine({314,180},{326,180},IM_COL32_WHITE);draw->AddLine({320,174},{320,186},IM_COL32_WHITE);render_frame(app.bar_window);}}
             if(ok)ok=capture(app.bar_window,executable_directory()/(mode==0?L"center-fov-preview.png":mode==1?L"target-box-preview.png":L"target-circle-preview.png"),true);
         }
@@ -1220,15 +1597,14 @@ int resource_test() {
         ok=create_surface(app,app.settings_window,false)&&create_surface(app,app.bar_window,true);
         Snapshot s;s.pid=1;s.local_team=2;s.players.resize(2);s.matrix={.5625f,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0};
         for(int i=0;i<2;++i){s.players[i].handle=uint32_t(i+1);s.players[i].dot_valid.fill(true);s.players[i].dot_visible.fill(true);s.players[i].visible=true;s.players[i].dots.fill({i==0?250.f:-650.f,0,i==0?1800.f:3200.f});}
-        app.settings.show_focus_area.fill(true);
+        app.settings.adaptive.show_area=app.settings.adaptive.show_target_zone=true;
         SetWindowPos(app.bar_window.hwnd,nullptr,0,0,640,360,SWP_NOACTIVATE|SWP_NOZORDER);
         for(int i=0;i<2200&&ok;++i) {
             MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
             app.settings.glass=(i/50)%2==0;
             app.settings.transparent_frame=(i/100)%2==0;
             app.menu_page=static_cast<solace::shell_page>((i/50)%3);
-            app.settings.head_dot=app.settings.body_dot=app.settings.pelvis_dot=true;
-            app.settings.focus_area.mode=static_cast<FocusAreaMode>((i/50)%3);
+            app.settings.adaptive.area=static_cast<AdaptiveAreaMode>((i/50)%2);
             if(i==0||(i>=200&&i%50==0))ShowWindow(app.settings_window.hwnd,(i/50)%2?SW_HIDE:SW_SHOWNOACTIVATE);
             ok=begin_frame(app.settings_window);
             if(ok){ImGui::GetIO().DeltaTime=1.f/240;ImGui::GetIO().MousePos={960,500};draw_settings(app,s);ok=end_frame(app.settings_window);}
@@ -1245,7 +1621,7 @@ int resource_test() {
     out<<"{\"passed\":"<<(ok?"true":"false")<<",\"cycles\":"<<cycles<<",\"frames_per_cycle\":2200,\"warmup_frames\":1200,\"private_before\":"<<before.memory<<",\"private_after\":"<<after.memory<<",\"handles_before\":"<<before.handles<<",\"handles_after\":"<<after.handles<<",\"gdi_before\":"<<before.gdi<<",\"gdi_after\":"<<after.gdi<<",\"user_before\":"<<before.user<<",\"user_after\":"<<after.user<<"}\n";
     return ok?0:1;
 }
-int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool trace_frames=false) {
+int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool trace_frames=false,bool test_tab_at_start=false) {
     if(!shutdown_test) {
         if(!SetPriorityClass(GetCurrentProcess(),high_priority?HIGH_PRIORITY_CLASS:NORMAL_PRIORITY_CLASS))
             std::cerr<<"Could not apply process priority: "<<GetLastError()<<"\n";
@@ -1255,7 +1631,8 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
     shutdown_complete=CreateEventW(nullptr,TRUE,FALSE,nullptr);SetConsoleCtrlHandler(console_handler,TRUE);
     SetConsoleTitleW(L"Deadlock Overlay - close console to exit");
     std::cout<<"Deadlock Overlay\nInsert: toggle menu. Drag menu header to move. Close this console to exit.\n";
-    Application app;app.diagnostics=diagnostics;
+    Application app;app.diagnostics=diagnostics;save(app.settings);
+    if(test_tab_at_start)app.menu_page=solace::shell_page::test;
     app.data_update.initialize(executable_directory());
     if(!create_surface(app,app.settings_window,false)||!create_surface(app,app.bar_window,true)) {
         MessageBoxW(nullptr,L"Overlay window or Direct3D initialization failed.",L"Deadlock Overlay",MB_ICONERROR);CloseHandle(single);return 1;
@@ -1265,14 +1642,23 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
     std::jthread reader([&](std::stop_token stop) {
         GameReader game;FramePacer sample_pacer;unsigned revision{};while(!stop.stop_requested()) {
             auto next_revision=app.data_revision.load();if(next_revision!=revision){game.refresh_data();revision=next_revision;}
-            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0});{std::lock_guard lock(app.mutex);app.snapshot=std::move(s);}
+            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0,(flags&16)!=0,(flags&32)!=0,(flags&64)!=0,(flags&128)!=0,(flags&256)!=0,(flags&512)!=0});
+            {
+                std::lock_guard lock(app.mutex);
+                // An active renderer update is a seqlock retry, not an invalid
+                // measured camera. Keep the last coherent sample for at most
+                // 50 ms; genuine invalid reads still publish immediately.
+                const bool retry=s.projection_pending&&s.pid==app.snapshot.pid&&app.snapshot.time
+                    &&motion_clock_ms()-app.snapshot.projection_ms<=50;
+                if(!retry)app.snapshot=std::move(s);
+            }
             sample_pacer.wait(app.sampling?app.sample_hz.load():5.0);
         }
     });
     std::jthread close_test;
     if(shutdown_test)close_test=std::jthread([] {Sleep(500);console_handler(CTRL_CLOSE_EVENT);});
     if(settings_at_start)app.open_settings();
-    bool insert_down=false;uint64_t last_report{},next_display_check{},fps_epoch=GetTickCount64();DWORD last_pid{};
+    bool insert_down=false;uint64_t last_report{},next_display_check{},fps_epoch=GetTickCount64();
     uint64_t rendered_frames{};FramePacer render_pacer;GameFrames game_frames;
     if(trace_frames&&!shutdown_test)game_frames.start();
     HWND cached_game{};DWORD cached_pid{},observed_reader_pid{};uint64_t next_window_check{};
@@ -1299,11 +1685,38 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         if(key&&!insert_down&&focused){if(app.show_settings)app.hide_settings();else app.open_settings();}insert_down=key;
         foreground=GetForegroundWindow();
         focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd);
-        bool hitbox_focus=app.settings.free_focus&&app.settings.free_focus_mode==FreeMovementMode::Hitboxes
-            &&(app.settings.replay_focus||app.settings.focus_visuals)&&(app.settings.focus_players||app.settings.focus_minions);
-        app.read_options.store((app.settings.skeletons?1u:0u)|(app.settings.focus_minions?2u:0u)|(app.settings.focus_orbs?4u:0u)|((app.settings.hitboxes||hitbox_focus)?8u:0u));
-        auto focus_speed=hero_focus_speed(snapshot.hero,app.settings.sniper_speed_override,app.settings.focus_speed,app.settings.sniper_focus_speed);
-        app.camera.update(app.makcu,snapshot,game,app.settings.replay_focus,app.settings.debug_focus,app.settings.exclude_teammates,app.show_settings,app.settings.focus_bone,focus_speed,app.settings.free_focus,app.settings.prediction,app.settings.projectile_speed,app.settings.inherit_velocity,app.settings.auto_speed,app.settings.visible_only,{app.settings.focus_players,app.settings.focus_minions,app.settings.focus_orbs},app.settings.focus_area,clock_ms(),app.settings.free_focus_mode,app.settings.focus_hold_button);
+        app.sync_input_backend();
+        const auto& control=app.focus_profile(snapshot);
+        const bool x2_down=focus_button_held(FocusHoldButton::X2);
+        const auto activation=resolve_focus_activation(control,x2_down,app.target_lock.active());
+        const bool adaptive_active=adaptive_mode(control);
+        bool hitbox_focus=control.free_focus&&(control.free_focus_mode==FreeMovementMode::Hitboxes||adaptive_active)
+            &&(control.replay_focus||control.focus_visuals||(adaptive_active&&control.adaptive.area==AdaptiveAreaMode::TargetZone&&control.adaptive.show_target_zone))
+            &&(control.focus_players||control.focus_minions);
+        const bool zone_geometry=control.adaptive.area==AdaptiveAreaMode::TargetZone&&(control.replay_focus||control.adaptive.show_target_zone);
+        const bool visual_visibility_geometry=app.settings.hidden_enemy_tags||(app.settings.enabled&&app.settings.hide_visible_healthbars);
+        app.read_options.store((app.settings.skeletons?1u:0u)|((control.focus_minions||control.auto_click)?2u:0u)|((control.focus_orbs||(control.auto_click&&control.auto_click_orbs_only))?4u:0u)|((app.settings.hitboxes||hitbox_focus||control.auto_click||visual_visibility_geometry||zone_geometry)?8u:0u)|((adaptive_active||app.ult_scope_active||control.x2_target_lock)?16u:0u)|(app.settings.show_midboss_hud?32u:0u)
+            |(app.settings.auto_parry.enabled?64u:0u)|((app.settings.auto_parry.enabled&&app.settings.auto_parry.counterspell)?128u:0u)|(app.settings.hidden_enemy_tags?256u:0u)|((app.settings.enabled||app.settings.healthbar_debug_box)?512u:0u));
+        const auto previous_moves=app.camera.moves+app.adaptive.moves+app.target_lock.moves;
+        app.adaptive.prepare(snapshot,control);
+        // Both input backends appear in Windows button state; do not let an injected
+        // pulse become the activation key for left-mouse camera focus.
+        const bool injected_hold=activation.button==FocusHoldButton::LeftMouse&&app.makcu.click_pulse_active();
+        app.target_lock.update(app.makcu,snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation,x2_down);
+        if(app.target_lock.active()) {
+            app.camera.release();app.adaptive.release();
+        }else if(adaptive_active) {
+            app.camera.release();
+            app.adaptive.update(app.makcu,snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation);
+        }else {
+            app.adaptive.release();
+            app.camera.update(app.makcu,snapshot,game,control.replay_focus&&!injected_hold,control.debug_focus,control.exclude_teammates,app.show_settings,
+                control.focus_bone,activation.speed,control.free_focus,control.prediction&&!app.ult_scope_active,control.projectile_speed,
+                control.inherit_velocity,control.auto_speed,control.visible_only,{control.focus_players,control.focus_minions,control.focus_orbs,control.strict_enemy_players},
+                focus_area_settings(control),clock_ms(),control.free_focus_mode,activation.button,&app.adaptive.zones(),app.ult_scope_active);
+        }
+        app.ray_click.update(app.makcu,snapshot,game,control.auto_click,app.show_settings,control.click_interval_ms,app.camera.moves+app.adaptive.moves+app.target_lock.moves!=previous_moves,control.auto_click_orbs_only,control.auto_click_orbs_hold_side);
+        app.auto_parry.update(app.makcu,snapshot,game,app.settings.auto_parry,app.show_settings);
         app.sampling=focused;
         // Input and foreground checks run before GPU pacing. A saturated queue is
         // polled with a bounded wait, without dropping a prepared render frame.
@@ -1311,10 +1724,15 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         auto queue_wait_start=clock_ms();
         if(focused&&IsWindowVisible(pacing_surface.hwnd)&&!pacing_surface.renderer.wait_for_frame(4))continue;
         auto queue_wait_ms=clock_ms()-queue_wait_start;
-        {std::lock_guard lock(app.mutex);snapshot=app.snapshot;}
-        bool visible=focused&&(app.settings.enabled||app.settings.skeletons||app.settings.hitboxes||app.settings.head_dot||app.settings.body_dot||app.settings.pelvis_dot||show_focus_area(app.settings)||(app.settings.focus_visuals&&(app.settings.free_focus||app.settings.replay_focus)))&&fresh(GetTickCount64(),snapshot.time);
-        if(last_pid!=snapshot.pid){app.displayed.clear();last_pid=snapshot.pid;}
-        app.sampling=focused;app.bars=0;int drawn_hitboxes=0;bool rendered=false,bar_raised=false;
+        // Keep activation, prediction and the zone outline on the same snapshot.
+        // The next loop picks up newer data after the bounded GPU wait.
+        const auto& focus=control;
+        const bool health_display_active=health_visuals_active(app.settings.health_visuals);
+        const bool enemy_tags_active=health_display_active&&app.settings.hidden_enemy_tags;
+        const bool health_features_active=health_display_active&&(app.settings.enabled||app.settings.skeletons||app.settings.hitboxes||app.settings.healthbar_debug_box||app.settings.hidden_enemy_tags);
+        bool visible=focused&&(health_features_active||app.settings.show_midboss_hud||app.settings.show_monitor_hud||show_focus_area(focus)||(focus.focus_visuals&&(focus.free_focus||focus.replay_focus))
+            ||(app.settings.auto_parry.enabled&&(app.settings.auto_parry.show_hud||app.settings.auto_parry.show_threat)))&&fresh(GetTickCount64(),snapshot.time);
+        app.sampling=focused;app.bars=app.hidden_tags=0;int drawn_hitboxes=0;bool rendered=false,bar_raised=false;
         if(visible) {
             RECT r{};POINT origin{};if(!GetClientRect(game,&r)||!ClientToScreen(game,&origin)||r.right<=0||r.bottom<=0)visible=false;
             else {
@@ -1326,50 +1744,43 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
                 if(!IsWindowVisible(app.bar_window.hwnd)){ShowWindow(app.bar_window.hwnd,SW_SHOWNOACTIVATE);bar_raised=true;}
                 if(!begin_frame(app.bar_window)){app.quit=true;break;}
                 auto draw=ImGui::GetBackgroundDrawList();float scale=float(GetDpiForWindow(game))/96;
-                draw_focus_area(draw,snapshot,app.settings,float(r.right),float(r.bottom),app.camera.target,scale);
-                for(const auto& player:snapshot.players) {
-                    if(!include_player(app.settings.exclude_teammates,snapshot.local_team,player.team))continue;
+                if(!app.target_lock.active())draw_focus_area(draw,snapshot,focus,float(r.right),float(r.bottom),adaptive_mode(focus)?app.adaptive.target():app.camera.target,scale,app.adaptive.zone(adaptive_mode(focus)?app.adaptive.target():app.camera.target),&app.zone_outline);
+                if(health_display_active)for(const auto& player:snapshot.players) {
+                    if(enemy_tags_active&&draw_hidden_enemy_tag(draw,snapshot,player,float(r.right),float(r.bottom),app.settings,scale))++app.hidden_tags;
+                    if(!enemy_teams(snapshot.local_team,player.team))continue;
                     if(app.settings.skeletons)draw_skeleton(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
                     if(app.settings.hitboxes)drawn_hitboxes+=draw_hitboxes(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
-                    bool free_visuals=app.settings.focus_visuals&&app.settings.free_focus&&app.settings.focus_players;
-                    bool hitbox_visuals=free_visuals&&app.settings.free_focus_mode==FreeMovementMode::Hitboxes;
-                    if(hitbox_visuals&&!app.settings.hitboxes)drawn_hitboxes+=draw_hitboxes(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale,{},app.settings.visible_only);
-                    if(app.settings.visible_only&&!player.visible)continue;
-                    if(free_visuals&&!hitbox_visuals){
-                        for(int i=0;i<2;++i){ScreenPoint a,b;
-                            if(player.dot_valid[i]&&player.dot_valid[i+1]&&(!app.settings.visible_only||(player.dot_visible[i]&&player.dot_visible[i+1]))&&project(snapshot.matrix,player.dots[i],float(r.right),float(r.bottom),a)&&project(snapshot.matrix,player.dots[i+1],float(r.right),float(r.bottom),b))
-                                draw->AddLine({a.x,a.y},{b.x,b.y},IM_COL32(100,210,230,180),2*scale);
+                    if(app.settings.enabled||app.settings.healthbar_debug_box) {
+                        BarRect rect,box;
+                        if(player_healthbar_rect(player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,rect,&box)) {
+                            if(app.settings.healthbar_debug_box&&box.right>box.left&&box.bottom>box.top)
+                                draw->AddRect({box.left+.5f,box.top+.5f},{box.right-.5f,box.bottom-.5f},IM_COL32(98,180,255,230),0,0,1.f);
+                            if(app.settings.enabled&&enemy_visual_visibility_allows(snapshot,player,app.settings.hide_visible_healthbars)){draw_vertical_bar(draw,rect,player.health,player.maximum,app.settings,scale);++app.bars;}
                         }
                     }
-                    ScreenPoint p;auto anchor=player.head;
-                    if(app.settings.enabled&&project(snapshot.matrix,anchor,float(r.right),float(r.bottom),p)) {
-                        float ratio=health_fraction(player.health,player.maximum);
-                        auto [item,added]=app.displayed.try_emplace(player.handle,ratio);float& fill=item->second;
-                        if(ratio>=fill)fill=ratio;else fill=std::max(ratio,fill-ImGui::GetIO().DeltaTime*2.5f);
-                        draw_bar(draw,p,player.health,player.maximum,fill,app.settings,scale);++app.bars;
-                    }
-                    const bool dots[]={app.settings.head_dot,app.settings.body_dot,app.settings.pelvis_dot};
-                    for(int i=0;i<3;++i)if((dots[i]||(free_visuals&&!hitbox_visuals))&&player.dot_valid[i]&&(!app.settings.visible_only||player.dot_visible[i])&&project(snapshot.matrix,player.dots[i],float(r.right),float(r.bottom),p))draw_dot(draw,p,i,scale);
                 }
-                if(app.settings.focus_visuals&&app.settings.free_focus&&app.settings.focus_minions)for(const auto& object:snapshot.focus_targets) {
-                    if(object.kind!=TargetKind::Minion||!include_player(app.settings.exclude_teammates,snapshot.local_team,object.team))continue;
-                    if(app.settings.free_focus_mode==FreeMovementMode::Hitboxes){drawn_hitboxes+=draw_hitboxes(draw,object,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale,{},app.settings.visible_only);continue;}
-                    for(int i=0;i<2;++i) {
-                        ScreenPoint a{},b{};
-                        if(object.dot_valid[i]&&object.dot_valid[i+1]&&(!app.settings.visible_only||(object.dot_visible[i]&&object.dot_visible[i+1]))
-                            &&project(snapshot.matrix,object.dots[i],float(r.right),float(r.bottom),a)&&project(snapshot.matrix,object.dots[i+1],float(r.right),float(r.bottom),b))
-                            draw->AddLine({a.x,a.y},{b.x,b.y},IM_COL32(100,210,230,180),2*scale);
+                if(focus.focus_visuals&&app.target_lock.active())
+                    drawn_hitboxes+=draw_adaptive_solution(draw,snapshot,app.target_lock.solution,float(r.right),float(r.bottom),scale);
+                else if(focus.focus_visuals&&adaptive_mode(focus))
+                    drawn_hitboxes+=draw_adaptive_solution(draw,snapshot,app.adaptive.solution,float(r.right),float(r.bottom),scale);
+                else if(focus.focus_visuals&&focus.free_focus) {
+                    for(const auto& player:snapshot.players) {
+                        const bool hitboxes_drawn=health_display_active&&app.settings.hitboxes&&enemy_teams(snapshot.local_team,player.team);
+                        drawn_hitboxes+=draw_focus_guide(draw,snapshot,player,focus,app.settings,float(r.right),float(r.bottom),scale,hitboxes_drawn);
                     }
+                    for(const auto& object:snapshot.focus_targets)
+                        drawn_hitboxes+=draw_focus_guide(draw,snapshot,object,focus,app.settings,float(r.right),float(r.bottom),scale);
                 }
-                if(app.settings.focus_visuals&&app.camera.engaged&&!app.camera.lost&&app.camera.point_valid) {
+                if(focus.focus_visuals&&app.camera.engaged&&!app.camera.lost&&app.camera.point_valid) {
                     ScreenPoint target_point{};
                     if(project(snapshot.matrix,app.camera.aim_point,float(r.right),float(r.bottom),target_point))
                         draw->AddCircle({target_point.x,target_point.y},9*scale,IM_COL32(255,200,70,240),24,2*scale);
                 }
-                // Bound animation state and discard values for despawned entities.
-                for(auto it=app.displayed.begin();it!=app.displayed.end();) {
-                    bool exists=false;for(const auto& p:snapshot.players)if(p.handle==it->first){exists=true;break;}
-                    if(!exists)it=app.displayed.erase(it);else ++it;
+                if(app.settings.show_monitor_hud)draw_session_hud(draw,app.session_monitor,float(r.right),scale);
+                if(app.settings.show_midboss_hud)draw_midboss_hud(draw,snapshot.midboss,scale);
+                if(app.settings.auto_parry.enabled) {
+                    if(app.settings.auto_parry.show_hud)draw_auto_parry_hud(draw,app.auto_parry,snapshot.parry,scale);
+                    if(app.settings.auto_parry.show_threat)draw_parry_threat(draw,snapshot,app.auto_parry.decision,float(r.right),float(r.bottom),scale);
                 }
                 if(!end_frame(app.bar_window)){app.quit=true;break;}
                 rendered=true;
@@ -1392,20 +1803,46 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         uint64_t now=GetTickCount64();
         if(rendered){auto work=clock_ms()-loop_start;auto present=app.bar_window.present_ms+app.settings_window.present_ms;work_sum+=work;queue_wait_sum+=queue_wait_ms;work_max=std::max(work_max,work);submit_sum+=app.bar_window.submit_ms+app.settings_window.submit_ms;present_sum+=present;present_max=std::max(present_max,present);++timing_frames;}
         if(now-fps_epoch>=1000){app.render_fps=double(rendered_frames)*1000/double(now-fps_epoch);rendered_frames=0;fps_epoch=now;}
-        if(diagnostics&&now-last_report>=1000){report(snapshot,executable_directory()/L"session.json",app.bars,IsWindowVisible(app.bar_window.hwnd)!=FALSE,GetWindowLongPtrW(app.bar_window.hwnd,GWL_EXSTYLE),app.bar_window.hwnd,app.show_settings,app.target_hz,app.render_fps,drawn_hitboxes);
-            visibility_report(snapshot,executable_directory()/L"visibility.json",app.settings.visible_only,app.camera.occluded);
+        app.session_monitor.observe(snapshot,now,app.render_fps,app.target_hz,app.makcu.queue_delay_ms(),
+            focused,rendered,rendered?clock_ms()-loop_start:0.,app.bar_window.present_ms+app.settings_window.present_ms,queue_wait_ms);
+        if(diagnostics&&now-last_report>=1000){report(snapshot,executable_directory()/L"session.json",app.bars,IsWindowVisible(app.bar_window.hwnd)!=FALSE,GetWindowLongPtrW(app.bar_window.hwnd,GWL_EXSTYLE),app.bar_window.hwnd,app.show_settings,app.target_hz,app.render_fps,drawn_hitboxes,app.hidden_tags);
+            report_x2_lock(snapshot,focus,app.target_lock,activation,executable_directory()/L"camera-lock.json");
+            std::ofstream tags_report(executable_directory()/L"enemy-tags.json");
+            tags_report<<"{\"enabled\":"<<(app.settings.hidden_enemy_tags?"true":"false")<<",\"hold_only\":"<<(app.settings.health_visuals.hold_only?"true":"false")<<",\"hold_key\":"<<app.settings.health_visuals.key<<",\"health_features_active\":"<<(health_display_active?"true":"false")<<",\"hide_when_visible\":"<<(app.settings.hide_visible_enemy_tags?"true":"false")
+                <<",\"active\":"<<(enemy_tags_active?"true":"false")<<",\"drawn\":"<<app.hidden_tags
+                <<",\"visibility_ready\":"<<(snapshot.visibility&&snapshot.camera_valid?"true":"false")
+                <<",\"transparent_frame\":"<<(app.settings.transparent_frame?"true":"false")<<",\"frame_opacity\":"<<(app.settings.transparent_frame?app.settings.frame_opacity:1.f)<<"}\n";
+            std::ofstream parry_report(executable_directory()/L"auto-parry.json");write_parry_data(parry_report,snapshot.parry,app.auto_parry.decision,&app.auto_parry);parry_report<<'\n';
+            std::ofstream boss_report(executable_directory()/L"midboss.json");const auto& boss=snapshot.midboss;
+            boss_report<<"{\"enabled\":"<<(app.settings.show_midboss_hud?"true":"false")<<",\"valid\":"<<(boss.valid?"true":"false")
+                <<",\"phase\":\""<<midboss_phase_name(boss.phase)<<"\",\"status\":\""<<escaped(boss.status)<<"\",\"game_clock\":"<<boss.game_clock
+                <<",\"next_spawn\":"<<boss.next_spawn<<",\"remaining\":"<<boss.remaining<<",\"kills\":"<<boss.kills<<",\"paused\":"<<(boss.paused?"true":"false")<<",\"sampled\":"<<boss.sampled<<"}\n";
+            app.session_monitor.write_latest(executable_directory()/L"session-monitor.json");
+            visibility_report(snapshot,executable_directory()/L"visibility.json",focus.visible_only,adaptive_mode(focus)?app.adaptive.solution.occluded:app.camera.occluded);
+            report_adaptive(snapshot,focus,app.adaptive,app.ult_scope_active,app.makcu.queue_delay_ms(),executable_directory()/L"adaptive.json");
+            if(adaptive_mode(focus))report_adaptive(snapshot,focus,app.adaptive,app.ult_scope_active,app.makcu.queue_delay_ms(),executable_directory()/L"camera.json");
+            std::ofstream click_report(executable_directory()/L"auto-click.json");
+            click_report<<"{\"enabled\":"<<(focus.auto_click?"true":"false")<<",\"profile\":\""<<(app.ult_profile_active?"vindicta_ult":"regular")
+                <<"\",\"status\":\""<<app.ray_click.status<<"\",\"orbs_only\":"<<(focus.auto_click_orbs_only?"true":"false")<<",\"hold_side\":"<<((!focus.auto_click_orbs_only||focus.auto_click_orbs_hold_side)?"true":"false")<<",\"interval_ms\":"<<focus.click_interval_ms<<",\"clicks_sent\":"<<app.makcu.clicks()<<",\"hit\":";
+            write_crosshair_hit(click_report,app.ray_click.hit);click_report<<"}\n";
             std::ofstream makcu_report(executable_directory()/L"makcu.json");
-            makcu_report<<"{\"backend\":\"makcu\",\"connected\":"<<(app.makcu.ready()?"true":"false")
+            makcu_report<<"{\"backend\":\""<<app.makcu.backend()<<"\",\"connected\":"<<(app.makcu.hardware_ready()?"true":"false")
+                <<",\"movement_ready\":"<<(app.makcu.ready()?"true":"false")
                 <<",\"status\":\""<<escaped(app.makcu.status())<<"\",\"commands_sent\":"<<app.makcu.sent()
                 <<",\"write_failures\":"<<app.makcu.failures()<<",\"superseded_commands\":"<<app.makcu.replaced()
-                <<",\"hold_button\":\""<<focus_button_name(app.settings.focus_hold_button)<<"\",\"free_movement_available\":true,\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\"}\n";
-            std::ofstream camera_report(executable_directory()/L"camera.json");camera_report<<"{\"effective_speed\":"<<focus_speed<<",\"sniper_speed_active\":"<<(sniper_speed_active(snapshot.hero,app.settings.sniper_speed_override)?"true":"false")<<",\"sniper_focus_speed\":"<<app.settings.sniper_focus_speed<<",\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(app.settings.debug_focus?"true":"false")<<",\"enabled\":"<<(app.settings.replay_focus?"true":"false")<<",\"speed\":"<<app.settings.focus_speed<<",\"bone\":"<<app.settings.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"hold_button\":\""<<focus_button_name(app.settings.focus_hold_button)<<"\",\"free_movement\":"<<(app.settings.free_focus?"true":"false")<<",\"free_movement_mode\":\""<<free_movement_name(app.settings.free_focus,app.settings.free_focus_mode)<<"\",\"hitbox_index\":"<<app.camera.hitbox_index<<",\"inside_hitbox\":"<<(app.camera.inside_hitbox?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(app.settings.prediction?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.settings.auto_speed?snapshot.weapon.speed:app.settings.projectile_speed)<<",\"auto_speed\":"<<(app.settings.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(app.settings.focus_area.mode)<<",\"focus_fov_percent\":"<<app.settings.focus_area.center_percent<<",\"focus_radius_meters\":"<<app.settings.focus_area.radius_meters<<",\"show_focus_area\":"<<(show_focus_area(app.settings)?"true":"false")<<"}\n";
+                <<",\"clicks_sent\":"<<app.makcu.clicks()
+                <<",\"motion_commands_sent\":"<<app.makcu.motion_sent()<<",\"windows_moves_sent\":"<<app.makcu.windows_moves()
+                <<",\"windows_clicks_sent\":"<<app.makcu.windows_clicks()<<",\"windows_parries_sent\":"<<app.makcu.windows_parries()<<",\"windows_releases_sent\":"<<app.makcu.windows_releases()
+                <<",\"windows_input_failures\":"<<app.makcu.windows_failures()<<",\"windows_last_error\":"<<app.makcu.windows_error()
+                <<",\"backend_generation\":"<<app.makcu.backend_generation()<<",\"host_queue_delay_ms\":"<<app.makcu.queue_delay_ms()
+                <<",\"hold_button\":\""<<focus_button_name(focus.focus_hold_button)<<"\",\"free_movement_available\":true,\"free_movement_mode\":\""<<free_movement_name(focus.free_focus,focus.free_focus_mode)<<"\"}\n";
+            std::ofstream camera_report(executable_directory()/(adaptive_mode(focus)?L"camera-legacy.json":L"camera.json"));camera_report<<"{\"profile\":\""<<(app.ult_profile_active?"vindicta_ult":"regular")<<"\",\"ult_scope_active\":"<<(app.ult_scope_active?"true":"false")<<",\"ult_profile_enabled\":"<<(app.settings.vindicta_ult_override?"true":"false")<<",\"effective_speed\":"<<activation.speed<<",\"sniper_speed_active\":"<<(app.ult_profile_active?"true":"false")<<",\"sniper_focus_speed\":"<<app.settings.vindicta_ult.focus_speed<<",\"replay\":"<<(snapshot.replay?"true":"false")<<",\"practice\":"<<(snapshot.practice?"true":"false")<<",\"debug_enabled\":"<<(focus.debug_focus?"true":"false")<<",\"enabled\":"<<(focus.replay_focus?"true":"false")<<",\"active_button\":\""<<focus_button_name(activation.button)<<"\",\"x1_speed\":"<<focus.focus_speed<<",\"x2_speed\":"<<focus.focus_speed_x2<<",\"speed\":"<<activation.speed<<",\"exclude_teammates\":"<<(focus.exclude_teammates?"true":"false")<<",\"visible_only\":"<<(focus.visible_only?"true":"false")<<",\"focus_players\":"<<(focus.focus_players?"true":"false")<<",\"focus_minions\":"<<(focus.focus_minions?"true":"false")<<",\"focus_orbs\":"<<(focus.focus_orbs?"true":"false")<<",\"focus_visuals\":"<<(focus.focus_visuals?"true":"false")<<",\"bone\":"<<focus.focus_bone<<",\"target\":"<<app.camera.target<<",\"engaged\":"<<(app.camera.engaged?"true":"false")<<",\"lost\":"<<(app.camera.lost?"true":"false")<<",\"moves\":"<<app.camera.moves<<",\"hold_button\":\""<<focus_button_name(focus.focus_hold_button)<<"\",\"free_movement\":"<<(focus.free_focus?"true":"false")<<",\"free_movement_mode\":\""<<free_movement_name(focus.free_focus,focus.free_focus_mode)<<"\",\"hitbox_index\":"<<app.camera.hitbox_index<<",\"inside_hitbox\":"<<(app.camera.inside_hitbox?"true":"false")<<",\"line_position\":"<<app.camera.line_position<<",\"target_kind\":\""<<target_kind_name(app.camera.kind)<<"\""<<",\"prediction_enabled\":"<<(focus.prediction&&!app.ult_scope_active?"true":"false")<<",\"prediction_active\":"<<(app.camera.prediction_active?"true":"false")<<",\"projectile_speed\":"<<(app.ult_scope_active?0.f:focus.auto_speed?snapshot.weapon.speed:focus.projectile_speed)<<",\"auto_speed\":"<<(focus.auto_speed?"true":"false")<<",\"weapon_valid\":"<<(snapshot.weapon.valid?"true":"false")<<",\"weapon_handle\":"<<snapshot.weapon.handle<<",\"weapon_base_speed\":"<<snapshot.weapon.base_speed<<",\"weapon_bonus_percent\":"<<snapshot.weapon.bonus_percent<<",\"weapon_inheritance\":"<<snapshot.weapon.inheritance<<",\"weapon_status\":\""<<escaped(snapshot.weapon.status)<<"\",\"flight_time\":"<<app.camera.flight_time<<",\"local_velocity_valid\":"<<(snapshot.local_velocity_valid?"true":"false")<<",\"input_failures\":"<<app.camera.input_failures<<",\"focus_area_mode\":"<<int(focus.adaptive.area)<<",\"focus_radius_degrees\":"<<focus.adaptive.radius_degrees<<",\"focus_padding_percent\":"<<focus.adaptive.padding_percent<<",\"show_focus_area\":"<<(show_focus_area(focus)?"true":"false")<<"}\n";
             if(timing_frames){std::ofstream perf(executable_directory()/L"frame-performance.json");perf<<"{\"frames\":"<<timing_frames<<",\"priority_class\":"<<GetPriorityClass(GetCurrentProcess())<<",\"composition\":"<<(app.bar_window.renderer.composition()?"true":"false")<<",\"busy_bar_presents\":"<<app.bar_window.busy_presents<<",\"busy_menu_presents\":"<<app.settings_window.busy_presents<<",\"menu_open\":"<<(app.show_settings?"true":"false")<<",\"work_ms\":"<<work_sum/timing_frames<<",\"submit_ms\":"<<submit_sum/timing_frames<<",\"present_ms\":"<<present_sum/timing_frames<<",\"queue_wait_ms\":"<<queue_wait_sum/timing_frames<<",\"wait_ms\":"<<wait_sum/timing_frames<<",\"max_work_ms\":"<<work_max<<",\"max_present_ms\":"<<present_max<<",\"reader_ms\":"<<snapshot.sample_us/1000<<"}\n";}
             work_sum=wait_sum=submit_sum=present_sum=queue_wait_sum=work_max=present_max=0;timing_frames=0;
             std::ofstream trace(executable_directory()/L"frame-trace.json");trace<<"{\"status\":\""<<escaped(app.frame_status)<<"\",\"enabled\":"<<(trace_frames?"true":"false")<<",\"error\":"<<game_frames.error()<<",\"events\":"<<game_frames.count()<<",\"delivery_delay_ms\":"<<game_frames.delay_ms()<<"}\n";last_report=now;}
         auto wait_start=clock_ms();if(!focused||!game_frames.wait(app.target_hz))render_pacer.wait(focused?app.target_hz:20.0);if(rendered)wait_sum+=clock_ms()-wait_start;
     }
-    app.makcu.stop();app.camera.release();
+    app.makcu.stop();app.camera.release();app.adaptive.release();
     app.data_update.cancel();
     reader.request_stop();reader.join();game_frames.stop();save(app.settings);
     HWND menu_handle=app.settings_window.hwnd,bar_handle=app.bar_window.hwnd;
@@ -1418,23 +1855,56 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
 }
 }
 int main(int argc,char** argv) {
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--menu-preview") {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        return overlay::menu_previews(std::filesystem::path(argv[i+1]));
+    }
+    for(int i=1;i<argc;++i)if(std::string(argv[i])=="--parry-probe") {
+        std::filesystem::path profile,result=overlay::executable_directory()/L"parry-probe.json";unsigned duration=8000;
+        for(int j=1;j+1<argc;++j) {
+            if(std::string(argv[j])=="--reader-profile")profile=argv[j+1];
+            if(std::string(argv[j])=="--parry-result")result=argv[j+1];
+            if(std::string(argv[j])=="--probe-ms")try {duration=std::clamp(unsigned(std::stoul(argv[j+1])),1000u,30000u);}catch(...){return 2;}
+        }
+        // Read-only observation: no input worker, device handle or overlay window.
+        overlay::GameReader game(profile);overlay::AutoParrySettings settings;settings.enabled=true;settings.observe_only=true;settings.counterspell=true;
+        std::ofstream out(result);out<<"{\"read_only\":true,\"events\":[";bool first=true;std::string previous;unsigned threats{};overlay::Snapshot snapshot;
+        const auto until=GetTickCount64()+duration;
+        do {
+            snapshot=game.sample({false,false,false,false,true,false,true,true});
+            const auto decision=overlay::find_parry_threat(snapshot,settings,GetTickCount64());
+            std::ostringstream signature;signature<<snapshot.parry.valid<<snapshot.parry.ready<<decision.valid<<decision.source;
+            for(const auto& attack:snapshot.parry.melee)signature<<'/'<<attack.pawn<<'/'<<attack.state<<'/'<<attack.status;
+            if(signature.str()!=previous) {
+                if(!first)out<<',';first=false;overlay::write_parry_data(out,snapshot.parry,decision);previous=signature.str();
+                if(decision.valid)++threats;
+            }
+            Sleep(4);
+        }while(GetTickCount64()<until);
+        out<<"],\"threat_events\":"<<threats<<",\"reader_status\":\""<<overlay::escaped(snapshot.status)<<"\",\"visibility\":\""<<overlay::escaped(snapshot.visibility_status)<<"\"}\n";
+        std::cout<<"Parry observation: "<<threats<<" threat events; "<<snapshot.parry.status<<'\n';
+        return out.good()&&snapshot.parry.valid?0:2;
+    }
     for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--validate-profile") {
         auto candidate=std::filesystem::path(argv[i+1]);auto result=candidate.parent_path()/L"profile-live-validation.json";
         for(int j=1;j+1<argc;++j)if(std::string(argv[j])=="--profile-result")result=std::filesystem::path(argv[j+1]);
         overlay::GameReader game(candidate);overlay::Snapshot s;bool passed=false;
         for(int attempt=0;attempt<8;++attempt) {
-            s=game.sample({true,true,true,true});
+            s=game.sample({true,true,true,true,true,false,true,false});
             bool live_geometry=std::any_of(s.players.begin(),s.players.end(),[](const auto& p){return p.dot_valid[0]&&p.dot_valid[1]&&p.dot_valid[2]&&!p.skeleton.empty()&&!p.hitboxes.empty();});
+            bool root_geometry=std::any_of(s.players.begin(),s.players.end(),[](const auto& p){return p.motion.position_valid;});
             bool local=std::any_of(s.skipped_players.begin(),s.skipped_players.end(),[](const auto& p){return p.reason=="Local player";});
-            passed=s.time&&s.projection.valid&&s.camera_valid&&s.controllers>0&&!s.missing_anchors&&live_geometry
-                &&(!local||s.hero.valid)&&(!local||s.replay||s.weapon.base_speed>=1000.f);
+            passed=s.time&&s.projection.valid&&s.camera_valid&&s.controllers>0&&!s.missing_anchors&&live_geometry&&root_geometry
+                &&(!local||s.hero.valid)&&(!local||s.replay||s.weapon.base_speed>=1000.f)
+                &&(!s.local_alive||s.replay||s.parry.valid);
             if(passed)break;
             if(attempt<7)Sleep(200);
         }
         std::string message=passed?"Reader profile passed live validation":s.status;
-        if(!passed&&s.status.starts_with("Connected"))message=s.players.empty()?"Load sandbox, bots or replay with a live remote player, then update again":s.missing_anchors?"Live bone reads failed; reader profile needs review":!s.hero.valid?"Live hero metadata did not validate":"Live hitbox or weapon data did not validate";
+        if(!passed&&s.status.starts_with("Connected"))message=s.players.empty()?"Load sandbox, bots or replay with a live remote player, then update again":s.missing_anchors?"Live bone reads failed; reader profile needs review":!s.hero.valid?"Live hero metadata did not validate":s.local_alive&&!s.parry.valid?s.parry.status:"Live hitbox or weapon data did not validate";
         std::ofstream out(result);out<<"{\"passed\":"<<(passed?"true":"false")<<",\"message\":\""<<overlay::escaped(message)<<"\",\"pid\":"<<s.pid<<",\"reader_profile\":\""<<overlay::escaped(s.reader_profile)<<"\",\"controllers\":"<<s.controllers<<",\"players\":"<<s.players.size()<<",\"missing_anchors\":"<<s.missing_anchors<<",\"hero_valid\":"<<(s.hero.valid?"true":"false")<<",\"weapon_valid\":"<<(s.weapon.valid?"true":"false")<<",\"weapon_base_speed\":"<<s.weapon.base_speed<<",\"weapon_status\":\""<<overlay::escaped(s.weapon.status)<<"\"}\n";
         overlay::report(s,result.parent_path()/L"profile-probe.json");
+        std::ofstream parry(result.parent_path()/L"profile-parry.json");overlay::write_parry_data(parry,s.parry);parry<<'\n';
         return passed&&out.good()?0:2;
     }
     for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--update-data") {
@@ -1449,17 +1919,17 @@ int main(int argc,char** argv) {
     }
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--makcu-probe") {
         overlay::MakcuInput device;device.start();auto deadline=GetTickCount64()+4000;
-        while(!device.ready()&&GetTickCount64()<deadline)Sleep(10);
-        bool connected=device.ready();
+        while(!device.hardware_ready()&&GetTickCount64()<deadline)Sleep(10);
+        bool connected=device.hardware_ready();
         // Exercise several heartbeat replies, including prompt consumption, without moving.
-        if(connected){Sleep(3500);connected=device.ready();}
+        if(connected){Sleep(3500);connected=device.hardware_ready();}
         auto status=device.status();device.stop();
         std::ofstream out(overlay::executable_directory()/L"makcu-probe.json");
         out<<"{\"connected\":"<<(connected?"true":"false")<<",\"status\":\""<<overlay::escaped(status)
             <<"\",\"movement_commands_sent\":"<<device.sent()<<"}\n";
         return connected?0:2;
     }
-    bool probe=false,diagnostics=false,settings=false,render_test=false,shutdown_test=false,benchmark=false,frame_probe=false,trace_frames=false,resource_test=false,extended=false;
+    bool probe=false,diagnostics=false,settings=false,render_test=false,shutdown_test=false,benchmark=false,frame_probe=false,trace_frames=false,resource_test=false,extended=false,test_tab=false;
     for(int i=1;i<argc;++i){std::string arg=argv[i];if(arg=="--self-test")return overlay::self_test();if(arg=="--visibility-test")return overlay::visibility_test();if(arg=="--render-test")render_test=true;if(arg=="--shutdown-test")shutdown_test=true;if(arg=="--probe")probe=true;if(arg=="--diagnostics")diagnostics=true;if(arg=="--settings")settings=true;}
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--benchmark")benchmark=true;
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--frame-trace-probe")frame_probe=true;
@@ -1468,6 +1938,7 @@ int main(int argc,char** argv) {
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--extended-read")extended=true;
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--legacy-renderer")overlay::prefer_composition=false;
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--normal-priority")overlay::high_priority=false;
+    for(int i=1;i<argc;++i)if(std::string(argv[i])=="--test-tab"){test_tab=true;settings=true;}
     try {
         if(frame_probe){overlay::GameReader game;auto s=game.sample();overlay::GameFrames frames;frames.target(s.pid);frames.start();Sleep(3000);
             std::ofstream out(overlay::executable_directory()/L"frame-trace-probe.json");out<<"{\"pid\":"<<s.pid<<",\"status\":\""<<overlay::escaped(frames.status())<<"\",\"error\":"<<frames.error()<<",\"events\":"<<frames.count()<<",\"delivery_delay_ms\":"<<frames.delay_ms()<<"}\n";frames.stop();return 0;}
@@ -1485,14 +1956,19 @@ int main(int argc,char** argv) {
         }
         if(probe){
             overlay::GameReader game;overlay::Snapshot s;
-            for(int i=0;i<8;++i){s=game.sample({true,true,true,true});if(s.time&&s.controllers)break;Sleep(200);}
+            for(int i=0;i<8;++i){s=game.sample({true,true,true,true,true,false,false,false,true});if(s.time&&s.controllers)break;Sleep(200);}
+            // Read-only observation warms the displacement window and compares
+            // the schema velocity candidate. This command never opens MAKCU.
+            if(s.time&&s.controllers)for(int i=0;i<40;++i){Sleep(16);s=game.sample({true,true,true,true,true,false,false,false,true});}
             overlay::report(s,overlay::executable_directory()/L"probe.json");
             overlay::visibility_report(s,overlay::executable_directory()/L"visibility-probe.json",true,false);
             RECT bounds{};GetClientRect(overlay::game_window(s.pid),&bounds);
             overlay::report_hitbox_focus(s,float(bounds.right),float(bounds.bottom),overlay::executable_directory()/L"hitbox-focus-probe.json");
+            overlay::report_ray_click(s,float(bounds.right),float(bounds.bottom),overlay::executable_directory()/L"ray-click-probe.json");
+            overlay::report_adaptive_geometry(s,overlay::executable_directory()/L"adaptive-probe.json");
             return s.time&&s.controllers?0:2;
         }
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(resource_test)return overlay::resource_test();if(render_test)return overlay::render_test();return overlay::run(diagnostics||shutdown_test,settings,shutdown_test,trace_frames);
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(resource_test)return overlay::resource_test();if(render_test)return overlay::render_test();return overlay::run(diagnostics||shutdown_test,settings,shutdown_test,trace_frames,test_tab);
     } catch(const std::exception& e) {std::ofstream out(overlay::executable_directory()/L"error.log",std::ios::app);out<<e.what()<<'\n';return 1;}
 }
 

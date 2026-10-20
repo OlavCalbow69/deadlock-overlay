@@ -1,10 +1,10 @@
 # How this overlay's visibility check works
 
-Updated 6 October 2026 for build 6753. This describes the implementation in this repository, including the distinction between “player partly visible” and “the exact focus point is clear.”
+Visibility implementation notes, with drawing/filter behavior updated 19 October 2026. This distinguishes “player partly visible” from “the exact focus point is clear”; binary details below retain their recorded validation versions.
 
 ## 1. Export static collision geometry
 
-The map-export helper reads the installed map VPK through ValveResourceFormat 20.0.6980. It looks for `world_physics.vphys_c`, or a model's PHYS aggregate where applicable. This supplies physics/collision geometry rather than screenshot pixels or the game's GPU depth buffer.
+The map-export helper reads the installed map VPK through ValveResourceFormat 20.1.7467. It looks for `world_physics.vphys_c`, or a model's PHYS aggregate where applicable. This supplies physics/collision geometry rather than screenshot pixels or the game's GPU depth buffer.
 
 It converts hull faces to triangle fans, copies mesh triangles, and approximates spheres/capsules with tessellation. The latter use 32 segments and two nine-ring hemispheres; degenerate pole triangles are removed. Part bind poses transform shapes into map/world coordinates. Compound children are decoded explicitly because the packaged parser version predates that layout. Non-finite vertices and degenerate triangles are rejected.
 
@@ -33,7 +33,7 @@ On a map change, the reader drops its current mesh reference and loads the new o
 
 Loading and BVH construction happen on the sampler thread once per map, not inside every draw call. They can temporarily delay fresh sampling—Midtown historically took about 1.3 seconds—while the UI remains responsive. Stale snapshots are gated from steering, and the projection matrix is refreshed after loading before publishing the new sample.
 
-Missing or invalid meshes retry after five seconds. With “Visible only” enabled, missing geometry or an invalid camera produces no permission to draw/focus through it. Disabling that setting bypasses the visibility restriction. The sampler currently still computes available visibility even when that setting is off.
+Missing or invalid meshes retry after five seconds. With a camera profile's “Visible only” enabled, missing geometry or an invalid camera does not authorize focus. Camera Focus and Vindicta Ultimate save independent switches. Health bars and hero tags each have an independent “Hide when visible” switch; unknown visibility does not authorize hidden-only drawing. Health bars default to both states and hero tags default to hidden-only. The sampler still computes available visibility for geometry coloring and focus checks.
 
 Meshes are immutable and held with shared ownership by snapshots. Switching maps releases the old mesh when the last outstanding snapshot releases it. There is no permanent cache of every visited map. A valid loaded mesh is refreshed after an in-menu data update or map transition; an unrelated manual file replacement requires restarting the overlay or triggering an update.
 
@@ -83,14 +83,14 @@ If any triangle intersects, the segment is blocked. If traversal finishes withou
 
 Each player gets three independent visibility bits: head, body, pelvis. Overall player visibility is their logical OR.
 
-- With “Visible only” on, a fully blocked player is omitted.
-- A player with any clear tested bone can keep its health bar, even if the head itself is behind a wall.
-- Each dot is drawn only when that dot's bone is clear.
-- A connecting line segment requires both endpoint bones to be clear.
+- Health bars show both clear and blocked enemies by default; their Hide when visible switch suppresses an exposed player. Teammates are always excluded.
+- Skeletons and hitboxes use their Visible/Blocked colors. Hide visible skeletons optionally suppresses a visible player's skeleton.
+- Hero tags require known visibility and a fully blocked enemy when their Hide when visible switch is on; with it off, visibility does not filter the tags.
+- Camera-focus dots/guides follow that camera profile's own Visible only setting.
 
-This is a partial-player eligibility rule, not per-pixel clipping. The bar can be positioned above the head/head-end while only the pelvis is clear. Checking both line endpoints also does not prove every point between them is unobstructed. The renderer does not stencil each overlay pixel against the game's depth buffer.
+These are point/shape eligibility rules, not per-pixel clipping. Checking both line endpoints does not prove every point between them is unobstructed. The renderer does not stencil each overlay pixel against the game's depth buffer.
 
-Independent drawing settings still apply. Turning off focus visuals hides the automatic focus dots/guide without disabling focus movement; separately enabled bone markers can remain visible.
+Independent drawing settings still apply. Turning off focus visuals hides the automatic focus dots/guide without disabling focus movement. The Health tab no longer has standalone head/body/pelvis markers.
 
 ## 7. Apply the answer to camera focus
 

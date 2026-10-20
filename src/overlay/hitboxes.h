@@ -3,12 +3,19 @@
 
 namespace overlay {
 enum class HitboxShape : uint8_t { Box, Sphere, Capsule };
+enum class AnatomicalRegion : uint8_t { Unknown, Head, Torso, Pelvis, Limb };
+inline const char* region_name(AnatomicalRegion region) {
+    switch(region){case AnatomicalRegion::Head:return "head";case AnatomicalRegion::Torso:return "torso";
+    case AnatomicalRegion::Pelvis:return "pelvis";case AnatomicalRegion::Limb:return "limb";default:return "unknown";}
+}
 struct ModelHitbox {
     Vec3 low{},high{};
     float radius{};
     int bone{-1},group{};
     HitboxShape shape{};
     bool translation_only{};
+    AnatomicalRegion region{};
+    uint64_t source_id{};
 };
 struct Hitbox {
     HitboxShape shape{};
@@ -17,6 +24,8 @@ struct Hitbox {
     int group{};
     std::array<Vec3,8> corners{};
     bool visible{},visibility_known{};
+    AnatomicalRegion region{};
+    uint64_t source_id{};
 };
 inline bool valid_hitbox(const ModelHitbox& box) {
     if(!finite(box.low)||!finite(box.high)||!std::isfinite(box.radius)||box.group<0||box.group>=32)return false;
@@ -33,7 +42,7 @@ inline bool world_hitbox(const ModelHitbox& model,std::array<float,8> transform,
         for(float value:transform)if(!std::isfinite(value))return false;
         transform[3]=1;transform[4]=transform[5]=transform[6]=0;transform[7]=1;
     }
-    Hitbox result;result.shape=model.shape;result.group=model.group;
+    Hitbox result;result.shape=model.shape;result.group=model.group;result.region=model.region;result.source_id=model.source_id;
     if(!scene_point(transform,model.low,result.a)||!scene_point(transform,model.high,result.b))return false;
     result.radius=model.radius*transform[3];
     if(result.shape==HitboxShape::Sphere)result.b=result.a;

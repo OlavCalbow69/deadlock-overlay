@@ -58,11 +58,14 @@ std::string GameReader::text(uintptr_t address, size_t limit) const {
     return {};
 }
 void GameReader::detach() {
+    replicated_melee_.clear();melee_template_={};
     if (process_) CloseHandle(process_);
     process_=nullptr; pid_=0; base_=entity_slot_=matrix_address_=engine_base_=world_renderer_base_=0;
-    types_.clear(); models_.clear(); controllers_.clear();extras_.clear(); next_enumerate_=0;
-    hero_names_.clear();heroes_.clear();ability_handles_.clear();ability_pawn_=0;sniper_handle_=UINT32_MAX;
-    velocities_.clear();local_motion_={};local_handle_=0;
+    types_.clear(); models_.clear(); controllers_.clear();extras_.clear();midbosses_.clear();midboss_cache_={};next_midboss_=0;next_enumerate_=0;
+    spell_projectiles_.clear();unsupported_projectiles_=0;counterspell_watcher_=0;next_counterspell_scan_=0;
+    hero_names_.clear();heroes_.clear();enemy_hero_labels_.clear();ability_handles_.clear();ability_pawn_=0;sniper_handle_=UINT32_MAX;
+    slide_abilities_.clear();slide_pawn_=0;slide_handle_=UINT32_MAX;
+    velocities_.clear();adaptive_motions_.clear();local_motion_={};local_handle_=0;
     visibility_.reset();visibility_map_.clear();next_visibility_load_=0;
     clear_map_cache();map_resolution_status_.clear();
 }
@@ -141,16 +144,20 @@ bool GameReader::attach() {
 }
 bool GameReader::read_projection(Snapshot& result) const {
     const auto view=base_+profile_.addresses.render_view;
+    bool pending=false,invalid=false;
     for(int attempt=0;attempt<3;++attempt) {
         uint8_t updating{},after{};std::array<float,8> camera{};
-        if(!read(view+0x1330,updating)||updating)continue;
-        if(!read(matrix_address_,result.matrix)||!read(view+0x10,camera)||!read(view+0x1330,after)||after)continue;
+        if(!read(view+0x1330,updating)){invalid=true;continue;}
+        if(updating){pending=true;continue;}
+        if(!read(matrix_address_,result.matrix)||!read(view+0x10,camera)||!read(view+0x1330,after)){invalid=true;continue;}
+        if(after){pending=true;continue;}
         auto info=projection_info(result.matrix);
         // Reject a partial update rather than combining two different views.
         if(!info.valid||!std::isfinite(camera[6])||!std::isfinite(camera[7])
-            ||std::abs(info.horizontal_fov-camera[6])>.25f||std::abs(info.aspect-camera[7])>.005f)continue;
-        result.projection=info;return true;
+            ||std::abs(info.horizontal_fov-camera[6])>.25f||std::abs(info.aspect-camera[7])>.005f){invalid=true;continue;}
+        result.projection=info;result.projection_ms=motion_clock_ms();result.projection_pending=false;return true;
     }
+    result.projection_pending=pending&&!invalid;
     return false;
 }
 bool GameReader::pawn_fields(uintptr_t address,FocusTarget& target,uintptr_t& scene,uint8_t& life) const {
@@ -162,6 +169,15 @@ bool GameReader::pawn_fields(uintptr_t address,FocusTarget& target,uintptr_t& sc
     std::memcpy(&scene,block.data()+f.scene_node-first,8);
     std::memcpy(&target.maximum,block.data()+f.max_health-first,4);std::memcpy(&target.health,block.data()+f.health-first,4);
     life=block[f.life_state-first];target.team=block[f.team-first];return true;
+}
+MotionSample GameReader::read_motion(uintptr_t pawn,uintptr_t scene,uint32_t handle) {
+    if(!options_.adaptive_motion||!scene)return {};
+    if(adaptive_motions_.size()>=512&&!adaptive_motions_.contains(handle))return {};
+    const auto started=motion_clock_ms();std::array<float,8> transform{};Vec3 root{},engine{};
+    if(!read(scene+profile_.fields.node_world,transform)||!scene_point(transform,{},root))return {};
+    bool valid=read(pawn+profile_.fields.abs_velocity,engine);
+    if(pointer(pawn+profile_.fields.scene_node)!=scene)return {};
+    return adaptive_motions_[handle].update(root,engine,valid,(started+motion_clock_ms())*.5);
 }
 void GameReader::clear_map_cache() {
     loaded_map_.clear();map_array_=map_rep_=map_world_=map_path_=0;map_count_=0;map_index_=-1;next_map_resolve_=0;
@@ -209,7 +225,7 @@ std::string GameReader::loaded_arena(uint64_t now) {
 }
 bool GameReader::enumerate(uintptr_t system) {
     std::array<uintptr_t,64> chunks{}; if (!read(system+0x10,chunks)) return false;
-    controllers_.clear();extras_.clear(); std::vector<unsigned char> block(512*0x70);
+    controllers_.clear();extras_.clear();midbosses_.clear();spell_projectiles_.clear();unsupported_projectiles_=0; std::vector<unsigned char> block(512*0x70);
     for (uint32_t c=0;c<64;++c) {
         if (!chunks[c] || !read(chunks[c],block.data(),block.size())) continue;
         for (uint32_t s=0;s<512;++s) {
@@ -219,6 +235,13 @@ bool GameReader::enumerate(uintptr_t system) {
             if (!ptr || index>0x7ffe || handle==UINT32_MAX || (handle&0x7fff)!=index) continue;
             auto name=type(ptr);
             if (name.find("CitadelPlayerController")!=std::string::npos) controllers_.push_back({ptr,handle});
+            if(options_.midboss&&name==".?AVC_NPC_MidBoss@@"&&midbosses_.size()<8)midbosses_.push_back({ptr,handle});
+            if(options_.spell_parry) {
+                if((name==".?AVC_Citadel_Projectile_Archer_ChargedShot@@"||name==".?AVC_Citadel_Projectile_Bebop_Hook@@")&&spell_projectiles_.size()<128)
+                    spell_projectiles_.push_back({ptr,handle});
+                else if(name.find("Projectile")!=std::string::npos&&name.find("Ability")==std::string::npos
+                    &&name.find("Modifier")==std::string::npos&&name.find("TouchVolume")==std::string::npos)++unsupported_projectiles_;
+            }
             auto kind=extra_target_kind(name);
             if(extras_.size()<512&&((kind==TargetKind::Minion&&options_.minions)||(kind==TargetKind::SoulOrb&&options_.orbs)))extras_.push_back({ptr,handle,kind});
         }
@@ -241,7 +264,9 @@ bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
     int mesh_count{};uintptr_t meshes{},masks{};
     if(!read(model+0x70,header))return false;
     std::memcpy(&mesh_count,header.data(),4);std::memcpy(&meshes,header.data()+8,8);std::memcpy(&masks,header.data()+0x20,8);
-    if(mesh_count<1||mesh_count>64||!meshes||!masks)return false;
+    // Body groups and LODs can exceed 64 mesh records while still sharing
+    // 64-bit group masks (6769: Rat King 132 meshes, Solomon 152).
+    if(mesh_count<1||mesh_count>256||!meshes||!masks)return false;
     std::vector<uintptr_t> mesh_array(mesh_count);std::vector<uint64_t> mesh_masks(mesh_count);
     if(!read(meshes,mesh_array.data(),mesh_array.size()*8)||!read(masks,mesh_masks.data(),mesh_masks.size()*8))return false;
     std::vector<BoneInfo::HitboxSet> sets;
@@ -286,6 +311,8 @@ bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
                 std::memcpy(&box.low,raw+0x18,12);std::memcpy(&box.high,raw+0x24,12);
                 std::memcpy(&box.radius,raw+0x30,4);std::memcpy(&box.group,raw+0x38,4);
                 box.shape=static_cast<HitboxShape>(raw[0x3c]);box.translation_only=raw[0x3d]!=0;
+                if(box.bone>=0&&size_t(box.bone)<info.regions.size())box.region=info.regions[box.bone];
+                box.source_id=(uint64_t(set.hash)<<32)^uint64_t(model)^uint64_t(bi+1);
                 if(!valid_hitbox(box))return false;
                 set.boxes.push_back(box);
             }
@@ -298,7 +325,7 @@ bool GameReader::load_hitboxes(uintptr_t model,BoneInfo& info) {
     if(!read(model+0x70,after)||after!=header||sets.empty())return false;
     info.hitbox_sets=std::move(sets);info.hitbox_hashes=std::move(set_hashes);info.hitboxes_loaded=true;return true;
 }
-bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitboxes,uint32_t disabled_groups) {
+bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitboxes,uint32_t disabled_groups,bool body_bounds) {
     auto fail=[&](const char* reason){player.anchor_status=reason;return false;};
     const auto transform_offset=profile_.fields.model_state+0x80;
     const auto binding_offset=profile_.fields.model_state+profile_.fields.model_handle;
@@ -327,10 +354,19 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
         std::vector<int16_t> parents(info.count);auto parent_array=pointer(model+0x180);
         if(!parent_array||!read(parent_array,parents.data(),parents.size()*sizeof(int16_t)))return fail("Bone parents unavailable; retrying");
         auto rig=resolve_bone_rig(bone_names,parents);
+        info.regions=rig_regions(bone_names,parents,rig);
         info.index=rig.anchor();info.dots={rig.head,rig.body,rig.pelvis};info.rig=rig.prefix;
         if(info.index>=0)info.name=bone_names[info.index];
         else info.error=rig.ambiguous?"Ambiguous player skeleton rig":"No supported head bone";
         info.edges=skeleton_edges(rig_skeleton_names(bone_names,rig),parents);
+        // Cache a bounded, unique set of actual body joints. Bar bounds do not
+        // depend on publishing skeleton segments or computing their visibility.
+        auto bound_bone=[&](int index) {
+            if(index>=0&&index<info.count&&info.bounds_bones.size()<64
+                &&std::find(info.bounds_bones.begin(),info.bounds_bones.end(),index)==info.bounds_bones.end())info.bounds_bones.push_back(index);
+        };
+        bound_bone(info.index);for(auto index:info.dots)bound_bone(index);
+        for(auto [a,b]:info.edges){bound_bone(a);bound_bone(b);}
         info.model_name=text(pointer(model+8),160);
         // Hitbox definitions must still bind against the original bone names.
         info.names=std::move(bone_names);
@@ -354,12 +390,16 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     int first=info.index,last=info.index;
     for(auto index:info.dots)if(index>=0&&index<count){first=std::min(first,index);last=std::max(last,index);}
     if(skeleton)for(auto [a,b]:info.edges){first=std::min(first,std::min(a,b));last=std::max(last,std::max(a,b));}
+    if(body_bounds)for(auto index:info.bounds_bones){first=std::min(first,index);last=std::max(last,index);}
     if(hitbox_set)for(const auto& box:hitbox_set->boxes)if(box.bone>=0){first=std::min(first,box.bone);last=std::max(last,box.bone);}
     std::array<unsigned char,1024*0x20> positions;
     if(!read(transforms+first*0x20,positions.data(),size_t(last-first)*0x20+(hitbox_set?0x20:sizeof(Vec3))))return fail("Cannot read bone transforms");
     auto position=[&](int index,Vec3& out){if(index<first||index>last)return false;std::memcpy(&out,positions.data()+(index-first)*0x20,sizeof(out));return finite(out);};
     if(!position(info.index,player.head))return fail("Invalid head transform");
     for(size_t i=0;i<info.dots.size();++i)player.dot_valid[i]=position(info.dots[i],player.dots[i]);
+    if(body_bounds)for(auto index:info.bounds_bones) {
+        Vec3 point;if(position(index,point)&&player.body_point_count<player.body_points.size())player.body_points[player.body_point_count++]=point;
+    }
     if(skeleton)for(auto [a,b]:info.edges) {
         SkeletonSegment segment;
         if(position(a,segment.a)&&position(b,segment.b)&&dot(sub(segment.a,segment.b),sub(segment.a,segment.b))<512.f*512.f)player.skeleton.push_back(segment);
@@ -417,13 +457,65 @@ bool GameReader::extra_anchor(const Entity& object,uintptr_t scene,FocusTarget& 
     // supplies position, scale and quaternion; scale is essential for neutrals.
     if(!scene_point(world_transform,center,world))return false;
     target.dots.fill(world);target.dot_valid.fill(true);
+    uint64_t collision_source=uint64_t(collision)^1469598103934665603ULL;
+    if(bounds_valid) {
+        // Identity changes with a replacement collision model or local bounds,
+        // not with pose/position. Target Zone can reset its scale smoothing.
+        for(size_t i=0;i<sizeof(bounds);++i)collision_source=(collision_source^reinterpret_cast<const unsigned char*>(bounds.data())[i])*1099511628211ULL;
+    }
     if(object.kind==TargetKind::Minion&&options_.hitboxes&&bounds_valid) {
         ModelHitbox model{bounds[0],bounds[1],0,-1,0,HitboxShape::Box};Hitbox box;
+        model.region=AnatomicalRegion::Torso;model.source_id=collision_source;
         if(world_hitbox(model,world_transform,box))target.hitboxes.push_back(box);
+    }
+    if(object.kind==TargetKind::SoulOrb&&bounds_valid) {
+        ModelHitbox model{bounds[0],bounds[1],0,-1,0,HitboxShape::Box};Hitbox box;
+        model.source_id=collision_source;
+        // A zero-volume or changing collision object is not a usable scale.
+        std::array<Vec3,2> after{};
+        if(bounds[1].x>bounds[0].x&&bounds[1].y>bounds[0].y&&bounds[1].z>bounds[0].z
+            &&world_hitbox(model,world_transform,box)
+            &&pointer(object.address+profile_.fields.collision)==collision
+            &&read(collision+profile_.fields.collision_min,after)&&std::memcmp(bounds.data(),after.data(),sizeof(bounds))==0)
+        {
+            target.activation_bounds=box;
+            // The orb uses its current collision bounds, not a player model
+            // hitbox. An inscribed sphere avoids firing at the bounds' corners.
+            const auto half=mul(sub(bounds[1],bounds[0]),.5f);
+            ModelHitbox shot{center,center,std::min({half.x,half.y,half.z}),-1,0,HitboxShape::Sphere};Hitbox current;
+            shot.source_id=collision_source;
+            if(world_hitbox(shot,world_transform,current))target.shot_bounds=current;
+        }
     }
     return true;
 }
-HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
+OrbState GameReader::orb_state(uintptr_t object,uintptr_t rules)const {
+    OrbState result;const auto& f=profile_.fields;const auto globals=pointer(base_+profile_.addresses.global_vars);
+    const auto first=std::min({f.orb_launch,f.orb_attackable,f.orb_end_attackable,f.orb_launch_number,profile_.layout.orb_predicted_claimed});
+    const auto last=std::max({f.orb_launch+4,f.orb_attackable+4,f.orb_end_attackable+4,f.orb_launch_number+4,profile_.layout.orb_predicted_claimed+1});
+    std::array<unsigned char,128> data{},again{};
+    uint8_t paused{};float clock_after{};
+    result.sampled=GetTickCount64();
+    if(!globals||!rules||pointer(rules)!=base_+profile_.addresses.rules_vtable
+        ||!read(globals+0x30,result.clock)||!read(rules+f.server_paused,paused)||paused>1
+        ||last-first>data.size()||!read(object+first,data.data(),last-first))return result;
+    std::memcpy(&result.launch,data.data()+f.orb_launch-first,4);std::memcpy(&result.opens,data.data()+f.orb_attackable-first,4);
+    std::memcpy(&result.closes,data.data()+f.orb_end_attackable-first,4);std::memcpy(&result.launch_number,data.data()+f.orb_launch_number-first,4);
+    const auto claimed=data[profile_.layout.orb_predicted_claimed-first];if(claimed>1)return result;
+    // CItemXP's client hit-prediction function tests this same attackable
+    // window and its already-hit latch. Its base health is normally zero.
+    if(!std::isfinite(result.clock)||result.clock<0||result.clock>10000000
+        ||!std::isfinite(result.launch)||!std::isfinite(result.opens)||!std::isfinite(result.closes)
+        ||result.launch<0||result.opens<result.launch||result.closes<=result.opens
+        ||result.closes-result.launch>120||result.clock<result.launch-2||result.launch_number<0)return result;
+    uint8_t paused_after{};
+    if(!read(object+first,again.data(),last-first)||again!=data
+        ||!read(globals+0x30,clock_after)||!std::isfinite(clock_after)||clock_after<result.clock||clock_after-result.clock>.1f
+        ||!read(rules+f.server_paused,paused_after)||paused_after!=paused
+        ||pointer(base_+profile_.addresses.global_vars)!=globals||pointer(base_+profile_.addresses.game_rules)!=rules)return result;
+    result.valid=true;result.paused=paused!=0;result.claim_pending=claimed!=0;return result;
+}
+HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn,bool read_abilities) {
     HeroProfile result;
     if(type(pawn.address)!=".?AVC_CitadelPlayerPawn@@")return result;
     // CCitadelHeroComponent::GetHeroData, client+0x767600: spawned, loading,
@@ -448,6 +540,9 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
         if(heroes_.size()>=256)heroes_.clear();
         auto sort=text(pointer(record+profile_.fields.hero_sort),100);auto token=hero_token(sort);
         if(token.empty())token=hero_token(text(pointer(record+profile_.fields.hero_search),100));
+        // The built-in target dummy (validated hero ID 55) leaves both label
+        // fields empty, but ships a localized hero_targetdummy name.
+        if(token.empty()&&result.id==55&&hero_names_.contains("hero_targetdummy"))token="hero_targetdummy";
         if(token.empty())return result;
         auto label=hero_names_.find(token);
         if(label==hero_names_.end())label=hero_names_.find(token+"_sort");
@@ -457,7 +552,7 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
     }
     result.name=cached->second.name;result.token=cached->second.token;result.valid=true;
     result.ability_status="No hero-specific focus profile";
-    if(vindicta(result)) {
+    if(read_abilities&&vindicta(result)) {
         result.ability_status="Waiting for Assassinate";
         auto abilities=pawn.address+profile_.fields.ability_component+profile_.fields.abilities;
         std::array<unsigned char,24> header{},header_after{};
@@ -490,11 +585,43 @@ HeroProfile GameReader::hero_profile(const std::array<uintptr_t,64>& chunks,cons
                 }
             }
         }
-    }else {ability_pawn_=0;sniper_handle_=UINT32_MAX;ability_handles_.clear();}
+    }else if(read_abilities) {ability_pawn_=0;sniper_handle_=UINT32_MAX;ability_handles_.clear();}
     std::array<uintptr_t,2> table_after{};
     if(!read(pawn.address+profile_.fields.hero_component,again.data(),component_size)||again!=component||!read(base_+profile_.addresses.hero_table,table_after)||table_after!=table
         ||pointer(array+size_t(result.id)*8)!=record||entity(chunks,pawn.handle).address!=pawn.address)return {};
     return result;
+}
+ViewInputState GameReader::view_input(const std::array<uintptr_t,64>& chunks,const Entity& pawn,const WeaponProfile& weapon) {
+    // View calibration needs the primary identity and zoom state, not a
+    // populated projectile-speed modifier cache (which may await a shot).
+    if(!options_.adaptive_motion||!weapon.handle||weapon.handle==UINT32_MAX)return {};
+    const auto& f=profile_.fields;
+    std::array<float,2> sensitivity{},sensitivity_after{};
+    if(!read(pawn.address+f.fov_sensitivity,sensitivity)||!std::isfinite(sensitivity[0])||sensitivity[0]<.0001f||sensitivity[0]>64
+        ||!std::isfinite(sensitivity[1])||sensitivity[1]<.0001f||sensitivity[1]>100000)return {};
+    auto abilities=pawn.address+f.ability_component+f.abilities;
+    std::array<unsigned char,24> header{},header_after{};int size{};uint32_t capacity{};uintptr_t data{};
+    if(!read(abilities,header))return {};
+    std::memcpy(&size,header.data(),4);std::memcpy(&data,header.data()+8,8);std::memcpy(&capacity,header.data()+16,4);capacity&=0x7fffffff;
+    if(size<=0||size>128||capacity<uint32_t(size)||capacity>128||!data)return {};
+    std::vector<uint32_t> handles(size);
+    if(!read(data,handles.data(),handles.size()*4))return {};
+    if(std::find(handles.begin(),handles.end(),weapon.handle)==handles.end())return {};
+    if(slide_pawn_!=pawn.address||handles!=slide_abilities_||slide_handle_==UINT32_MAX) {
+        slide_pawn_=pawn.address;slide_abilities_=handles;slide_handle_=UINT32_MAX;
+        for(auto handle:handles) {
+            auto ability=entity(chunks,handle);
+            if(ability.address&&type(ability.address)==".?AVCCitadel_Ability_Slide@@"){slide_handle_=handle;break;}
+        }
+    }
+    auto slide=entity(chunks,slide_handle_),primary=entity(chunks,weapon.handle);
+    uint8_t sliding{},zoom{},sliding_after{},zoom_after{};
+    if(!slide.address||!primary.address||!read(slide.address+f.slide_active,sliding)||sliding>1||!read(primary.address+f.weapon_zoom,zoom)||zoom>1
+        ||!read(pawn.address+f.fov_sensitivity,sensitivity_after)||sensitivity!=sensitivity_after
+        ||!read(slide.address+f.slide_active,sliding_after)||sliding!=sliding_after||!read(primary.address+f.weapon_zoom,zoom_after)||zoom!=zoom_after
+        ||!read(abilities,header_after)||header!=header_after||entity(chunks,slide_handle_).address!=slide.address
+        ||entity(chunks,weapon.handle).address!=primary.address||entity(chunks,pawn.handle).address!=pawn.address)return {};
+    return {true,sliding!=0,zoom!=0,sensitivity[0],sensitivity[1]};
 }
 WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,const Entity& pawn) {
     WeaponProfile result;
@@ -536,6 +663,10 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     if(!info)return result;
     std::array<unsigned char,32> values{};if(!read(info+0xd8,values))return result;
     std::memcpy(&result.base_speed,values.data(),4);std::memcpy(&result.random_factor,values.data()+4,4);std::memcpy(&result.inheritance,values.data()+28,4);
+    std::array<unsigned char,72> primary_map{};uint32_t primary_handle{};
+    if(!read(component+24,primary_map)||primary_map!=map||!read(slot_address+4,primary_handle)||primary_handle!=handle
+        ||entity(chunks,handle).address!=ability.address||entity(chunks,pawn.handle).address!=pawn.address)return result;
+    result.handle=handle;
     // Named modifier IDs and the cache base come from the validated profile.
     // The code witness still pins the version/dirty fields and 0x30-byte stride.
     const auto speed_index=profile_.layout.bullet_speed_index,override_index=profile_.layout.bullet_override_index;
@@ -572,9 +703,42 @@ WeaponProfile GameReader::weapon_profile(const std::array<uintptr_t,64>& chunks,
     result.handle=handle;result.speed=result.base_speed*(1.f+result.bonus_percent/100.f);
     result.valid=true;result.status="Live primary weapon";return result;
 }
+MidBossState GameReader::midboss_state(uintptr_t rules,const std::array<uintptr_t,64>& chunks,uint64_t now) {
+    if(now<next_midboss_)return midboss_cache_;
+    next_midboss_=now+100;MidBossState state;state.sampled=now;const auto& f=profile_.fields;
+    int kills{},clock_tick{},clock_tick_after{},tick{},game_state{};float next{},clock{},clock_after{},interval{},current{};uint8_t paused{},paused_after{};
+    auto globals=pointer(base_+profile_.addresses.global_vars);
+    if(!rules||pointer(rules)!=base_+profile_.addresses.rules_vtable||!globals
+        ||!read(rules+f.midboss_kills,kills)||!read(rules+f.midboss_next_spawn,next)
+        ||!read(rules+f.match_clock_tick,clock_tick)||!read(rules+f.match_clock_time,clock)
+        ||!read(rules+f.server_paused,paused)||paused>1||!read(rules+f.game_state,game_state)
+        ||!read(globals+68,tick)||!read(globals+84,interval)||!std::isfinite(interval)||interval<.001f||interval>.1f
+        ||clock_tick<0||tick<clock_tick||tick-clock_tick>10000000||!std::isfinite(clock)
+        ||!read(rules+f.match_clock_tick,clock_tick_after)||clock_tick_after!=clock_tick
+        ||!read(rules+f.match_clock_time,clock_after)||clock_after!=clock||!read(rules+f.server_paused,paused_after)||paused_after!=paused
+        ||pointer(base_+profile_.addresses.game_rules)!=rules||pointer(base_+profile_.addresses.global_vars)!=globals) {
+        state.status="Mid Boss clock unavailable";return midboss_cache_=state;
+    }
+    // Same game-clock domain as the minimap's next-spawn timestamp. Networked
+    // anchors absorb pauses; never advance this countdown with wall-clock time.
+    if(!midboss_clock(clock,clock_tick,tick,interval,paused!=0,current)){state.status="Mid Boss clock unavailable";return midboss_cache_=state;}
+    bool alive=false;
+    for(const auto& boss:midbosses_) {
+        if(entity(chunks,boss.handle).address!=boss.address)continue;
+        int health{};uint8_t life{};
+        if(read(boss.address+f.health,health)&&read(boss.address+f.life_state,life)&&!life&&health>0
+            &&entity(chunks,boss.handle).address==boss.address){alive=true;break;}
+    }
+    if(game_state<6&&!alive){state.status="Waiting for match to start";return midboss_cache_=state;}
+    state=overlay::midboss_state(current,next,kills,alive,paused,now);
+    return midboss_cache_=state;
+}
 Snapshot GameReader::sample(ReadOptions options) {
-    if(options.minions!=options_.minions||options.orbs!=options_.orbs)next_enumerate_=0;
+    if(options.parry)options.adaptive_motion=true;
+    if(options.minions!=options_.minions||options.orbs!=options_.orbs||options.midboss!=options_.midboss||options.parry!=options_.parry||options.spell_parry!=options_.spell_parry)next_enumerate_=0;
     options_=options;
+    if(!options.enemy_tags)enemy_hero_labels_.clear();
+    if(!options.adaptive_motion)adaptive_motions_.clear();
     const auto started=std::chrono::steady_clock::now();read_calls_=0;
     Snapshot result;
     if (process_ && WaitForSingleObject(process_,0)!=WAIT_TIMEOUT) {detach();status_="Waiting for Deadlock";next_attach_=0;}
@@ -629,10 +793,11 @@ Snapshot GameReader::sample(ReadOptions options) {
     now=GetTickCount64();
     if(!read_projection(result)){result.status="Waiting for a stable render view";return result;}
     result.camera_valid=camera_origin(result.matrix,result.camera_position);
-    if (now>=next_enumerate_) {if (!enumerate(system)) {result.status="Cannot read entity list";return result;} next_enumerate_=now+((options.minions||options.orbs)?100:1000);}
+    if (now>=next_enumerate_) {if (!enumerate(system)) {result.status="Cannot read entity list";return result;} next_enumerate_=now+(options.spell_parry?20:(options.minions||options.orbs||options.parry)?100:1000);}
     result.controllers=static_cast<int>(controllers_.size());
     std::array<uintptr_t,64> chunks{};
     if(!read(system+0x10,chunks)){result.status="Cannot read current entity chunks";return result;}
+    if(options.midboss)result.midboss=midboss_state(rules,chunks,now);
     for (const auto& controller:controllers_) {
         uint32_t handle=UINT32_MAX;
         auto skip=[&](std::string_view reason,std::string_view model={}) {
@@ -649,15 +814,23 @@ Snapshot GameReader::sample(ReadOptions options) {
         if(controller_fields[f.local_controller-controller_first]) {
             result.hero=hero_profile(chunks,pawn);
             result.weapon=weapon_profile(chunks,pawn);
-            uint8_t team{};
-            if(read(pawn.address+profile_.fields.team,team)&&entity(chunks,handle).address==pawn.address)result.local_team=team;
-            Player local;auto scene=pointer(pawn.address+profile_.fields.scene_node);
+            result.view_input=view_input(chunks,pawn,result.weapon);
+            Player local;uintptr_t scene{};uint8_t life{};
+            if(pawn_fields(pawn.address,local,scene,life)&&entity(chunks,handle).address==pawn.address) {
+                result.local_team=local.team;
+                result.local_alive=!life&&local.health>0&&local.maximum>0;
+                result.local_motion=read_motion(pawn.address,scene,handle);
+            }
             if(local_handle_!=handle){local_motion_={};local_handle_=handle;}
             if(scene&&anchor(scene,local)&&local.dot_valid[2]&&entity(chunks,handle).address==pawn.address){
                 local_motion_.update(local.dots[2],now);result.local_velocity=local_motion_.velocity;result.local_velocity_valid=local_motion_.valid;
             }else local_motion_={};
+            if(options.parry&&result.local_alive) {
+                read_parry_local(result.parry,chunks,pawn,rules);
+                result.parry.local_velocity=result.local_motion.velocity_valid?result.local_motion.velocity:result.local_velocity_valid?result.local_velocity:Vec3{};
+            }
             uint32_t current_handle{};
-            if(!read(controller.address+profile_.fields.pawn_handle,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.local_velocity_valid=false;local_motion_={};}
+            if(!read(controller.address+profile_.fields.pawn_handle,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.view_input={};result.parry={};result.local_team=0;result.local_alive=false;result.local_velocity_valid=false;result.local_motion={};local_motion_={};}
             skip("Local player");
             continue;
         }
@@ -672,10 +845,33 @@ Snapshot GameReader::sample(ReadOptions options) {
         if(dormant){skip("Dormant player");continue;}
         uint32_t disabled_groups{};
         bool hitboxes=options.hitboxes&&read(pawn.address+profile_.fields.disabled_groups,disabled_groups);
-        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups)) {++result.missing_anchors;skip(p.anchor_status,p.model_name);continue;}
+        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups,options.healthbar_bounds)) {++result.missing_anchors;skip(p.anchor_status,p.model_name);continue;}
         if(hitboxes){uint32_t after{};if(!read(pawn.address+profile_.fields.disabled_groups,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
+        if(options.enemy_tags) {
+            // Source player origins follow the feet, including jumps and slides.
+            // This avoids assuming a fixed distance below the pelvis or head.
+            std::array<float,8> root{};
+            p.feet_valid=read(scene+f.node_world,root)&&scene_point(root,{},p.feet);
+            auto found=enemy_hero_labels_.find(handle);
+            if(found==enemy_hero_labels_.end()||found->second.pawn!=pawn.address||found->second.model!=p.model_name||now>=found->second.refresh_at) {
+                // Read identity only: remote Vindictas must not modify the local
+                // Assassinate cache or activate the local ultimate profile.
+                auto hero=hero_profile(chunks,pawn,false);
+                if(enemy_hero_labels_.size()>=512&&found==enemy_hero_labels_.end())enemy_hero_labels_.clear();
+                found=enemy_hero_labels_.insert_or_assign(handle,EnemyHeroLabel{pawn.address,p.model_name,hero.valid?hero.name:std::string{},now+(hero.valid?500:100)}).first;
+            }
+            p.hero_name=found->second.name;
+        }
         if (entity(chunks,handle).address!=pawn.address) {skip("Pawn identity changed",p.model_name);continue;}
+        p.motion=read_motion(pawn.address,scene,handle);
+        if(entity(chunks,handle).address!=pawn.address){skip("Pawn identity changed",p.model_name);continue;}
         if(p.dot_valid[2]&&(velocities_.size()<512||velocities_.contains(handle))){auto& estimate=velocities_[handle];estimate.update(p.dots[2],now);p.velocity=estimate.velocity;p.velocity_valid=estimate.valid;}
+        if(options.parry) {
+            auto melee=read_melee(chunks,pawn,p);
+            if(melee.replicated)++result.parry.replicated_readers;
+            else if(!melee.ability)++result.parry.unavailable_melee;
+            result.parry.melee.push_back(std::move(melee));
+        }
         result.players.push_back(std::move(p));
     }
     for(const auto& object:extras_) {
@@ -686,16 +882,30 @@ Snapshot GameReader::sample(ReadOptions options) {
         if(!scene||life||!read(scene+profile_.fields.dormant,dormant)||dormant)continue;
         if(object.kind==TargetKind::Minion&&(target.health<=0||target.maximum<=0))continue;
         if(!extra_anchor(object,scene,target)||entity(chunks,object.handle).address!=object.address||pointer(object.address+profile_.fields.scene_node)!=scene)continue;
+        if(object.kind==TargetKind::SoulOrb)target.orb=orb_state(object.address,rules);
+        target.motion=read_motion(object.address,scene,object.handle);
+        if(entity(chunks,object.handle).address!=object.address)continue;
         if(velocities_.size()<512||velocities_.contains(object.handle)) {
             auto& estimate=velocities_[object.handle];estimate.update(target.dots[1],now);
             target.velocity=estimate.velocity;target.velocity_valid=estimate.valid;
         }
         result.focus_targets.push_back(std::move(target));
     }
+    if(options.spell_parry)read_spell_threats(result.parry,chunks);
     for(auto it=velocities_.begin();it!=velocities_.end();){
         bool found=false;for(const auto& p:result.players)if(p.handle==it->first){found=true;break;}
         if(!found)for(const auto& p:result.focus_targets)if(p.handle==it->first){found=true;break;}
         if(!found)it=velocities_.erase(it);else ++it;
+    }
+    for(auto it=adaptive_motions_.begin();it!=adaptive_motions_.end();) {
+        bool found=it->first==local_handle_;
+        if(!found)for(const auto& p:result.players)if(p.handle==it->first){found=true;break;}
+        if(!found)for(const auto& p:result.focus_targets)if(p.handle==it->first){found=true;break;}
+        if(!found)it=adaptive_motions_.erase(it);else ++it;
+    }
+    for(auto it=enemy_hero_labels_.begin();it!=enemy_hero_labels_.end();) {
+        const bool live=std::any_of(result.players.begin(),result.players.end(),[&](const auto& p){return p.handle==it->first;});
+        if(!live)it=enemy_hero_labels_.erase(it);else ++it;
     }
     const auto ray_started=std::chrono::steady_clock::now();
     if(result.visibility&&result.camera_valid) {

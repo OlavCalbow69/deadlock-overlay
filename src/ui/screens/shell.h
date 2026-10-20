@@ -15,7 +15,7 @@ ImVec2 animate_size(const ImVec2& target);
 ImRect plate(float background_opacity = 1.f);
 } // namespace shell
 
-enum class shell_page { camera, health, connection };
+enum class shell_page { camera, health, connection, vindicta_ult, test, auto_parry, auto_click };
 
 struct shell_extension
 {

@@ -1,5 +1,8 @@
 #include "ui/foundation/icons.h"
 #include "ui/foundation/svg.h"
+#include "graphics/dx11_helpers.h"
+#include "generated/icons/assassinate_png.h"
+#include "../../../thirdparty/stb/stb_image.h"
 
 namespace solace::icons
 {
@@ -7,12 +10,27 @@ namespace
 {
 constexpr float k_view_box = 24.f;
 constexpr float k_stroke = 2.f;
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> assassinate_texture;
 
 float unit(float box)
 {
     return box / k_view_box;
 }
 } // namespace
+
+void initialize_textures(ID3D11Device* device, ID3D11DeviceContext* context)
+{
+    if (!device || !context || assassinate_texture) return;
+    int width{}, height{}, channels{};
+    auto* pixels = stbi_load_from_memory(assets::assassinate_png,
+        static_cast<int>(sizeof(assets::assassinate_png)), &width, &height, &channels, 4);
+    if (pixels && width > 0 && height > 0)
+        assassinate_texture = dx11::create_rgba_texture(device, context, pixels,
+            static_cast<unsigned>(width), static_cast<unsigned>(height));
+    if (pixels) stbi_image_free(pixels);
+}
+
+void shutdown_textures() { assassinate_texture.Reset(); }
 
 void stroke_path(ImDrawList* dl, const char* d, const ImVec2& top_left, float box, ImU32 col,
                  float stroke_width, float fraction)
@@ -196,6 +214,24 @@ void draw(id which, ImDrawList* dl, const ImVec2& tl, float box, ImU32 col)
         break;
     }
 
+    case id::code:
+    {
+        // Phosphor regular code: original SVG and MIT notice in assets/icons/phosphor.
+        const float scale = box / 256.f;
+        auto segment = [&](ImVec2 a, ImVec2 b) {
+            a = tl + a * scale; b = tl + b * scale;
+            dl->AddLine(a, b, col, 16.f * scale);
+            dl->AddCircleFilled(a, 8.f * scale, col, 12);
+            dl->AddCircleFilled(b, 8.f * scale, col, 12);
+        };
+        segment({64.f, 88.f}, {16.f, 128.f});
+        segment({16.f, 128.f}, {64.f, 168.f});
+        segment({192.f, 88.f}, {240.f, 128.f});
+        segment({240.f, 128.f}, {192.f, 168.f});
+        segment({160.f, 40.f}, {96.f, 216.f});
+        break;
+    }
+
     case id::list_todo:
         path("M13 5h8");
         path("M13 12h8");
@@ -323,6 +359,13 @@ void draw(id which, ImDrawList* dl, const ImVec2& tl, float box, ImU32 col)
 
     case id::command:
         path("M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3");
+        break;
+
+    case id::assassinate:
+        if (assassinate_texture)
+            dl->AddImage(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(assassinate_texture.Get())),
+                tl, tl + ImVec2(box, box), ImVec2(0, 0), ImVec2(1, 1), col);
+        else draw(id::target, dl, tl, box, col);
         break;
 
     default:

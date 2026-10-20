@@ -1,14 +1,20 @@
 # Static map visibility
 
-Health bars → **Visible only** is enabled by default and persists with settings. It applies to drawing and camera focus. Existing preferences are preserved.
+Camera Focus and Vindicta Ultimate each have an independent **Visible only**
+setting for focus points. Both are enabled by default and saved separately.
+Health bars show both visibility states by default; their separate **Hide when
+visible** switch makes them hidden-only. Hero name tags have their own such
+switch, initially enabled. All Health-tab visuals always exclude teammates. The old health visibility
+config key is ignored and no longer saved. Skeletons, hitboxes and hidden-enemy
+tags retain their own visibility rules, including Hide visible skeletons.
 
 The sampler normalizes the live map name and loads `maps/<map>.tri` beside the EXE. The file contains little-endian, headerless triangles: three XYZ float32 vertices per triangle, 36 bytes each. Invalid, empty, oversized or missing files fail closed while the option is enabled. Unavailable camera position also fails closed. Disable Visible only to restore the previous behaviour.
 
 Each mesh is immutable and shared by snapshots. A balanced BVH is built on the sampler thread once on map change, not on the render thread. Missing files retry after five seconds. Leaving a map releases its geometry after outstanding snapshots finish using it; only the current map is cached. During loading, stale player samples cannot steer the camera. The projection matrix is refreshed after loading.
 
-Visibility rays run from the matrix-derived camera position to head/body/pelvis. At least one clear bone keeps a player's healthbar eligible; blocked dots are omitted and connecting segments require both endpoint bones to be clear. Focus acquisition requires its selected bone to be clear. While holding a target, the exact interpolated point and predicted focus point are checked separately. A blocked point pauses movement and clears fractional motion; the same selected target can resume when clear. This does not automatically switch targets behind walls.
+Visibility rays run from the matrix-derived camera position to head/body/pelvis. The results drive skeleton/hitbox coloring and hidden-enemy tags; health bars use them only when Hide when visible is enabled. With its Visible only enabled, focus acquisition requires a clear permitted point. While holding a target, the exact current point and predicted focus point are checked separately. A blocked point pauses movement and clears fractional motion; target retention follows the active movement mode.
 
-The four installed meshes were extracted from this machine's map VPKs using ValveResourceFormat 20.0.6980 and the included map-export helper. Newer `m_compounds` children are decoded explicitly because the released package predates compound support. Hulls are triangulated by face loops; meshes preserve their triangles; capsules/spheres are tessellated. Part bind poses are applied. Trigger/playerclip/npcclip/sky and window-only geometry is excluded. Solid/default geometry and line-of-sight/foliage blockers are included. Source SHA256 and extraction counts are recorded in each `.tri.json`.
+The four installed meshes were extracted from this machine's map VPKs using ValveResourceFormat 20.1.7467 and the included map-export helper. Newer `m_compounds` children are decoded explicitly because the released package predates compound support. Hulls are triangulated by face loops; meshes preserve their triangles; capsules/spheres are tessellated. Part bind poses are applied. Trigger/playerclip/npcclip/sky and window-only geometry is excluded. Solid/default geometry and line-of-sight/foliage blockers are included. Source SHA256 and extraction counts are recorded in each `.tri.json`.
 
 | Map | Triangles | One-time load/build | Average ray test |
 | --- | ---: | ---: | ---: |

@@ -4,9 +4,10 @@
 #include <span>
 
 namespace overlay {
-enum class FreeMovementMode { BoneLine, Hitboxes };
+// Hitboxes (value 1) is a retired config value, migrated to Adaptive/WholeBody.
+enum class FreeMovementMode { BoneLine, Hitboxes, Adaptive };
 inline const char* free_movement_name(bool enabled,FreeMovementMode mode) {
-    return !enabled?"off":mode==FreeMovementMode::Hitboxes?"hitboxes_v2":"closest_line";
+    return !enabled?"off":mode==FreeMovementMode::Adaptive?"adaptive":mode==FreeMovementMode::Hitboxes?"hitboxes_v2":"closest_line";
 }
 struct ClosestHitboxPoint {
     Vec3 world{};ScreenPoint screen{};float distance{};int index{-1};bool inside{};
@@ -131,7 +132,7 @@ inline Point blend(const Point& a,const Point& b,double t) {
 }
 // Two-dimensional GJK distance on the actual projected volume. The simplex has
 // at most three points; perspective weights keep the result inside the shape.
-inline bool closest(const Projection& projection,const Hitbox& box,Vec3 lead,Point& out) {
+inline bool closest(const Projection& projection,const Hitbox& box,Vec3 lead,Point& out,double tolerance=.02) {
     Point center;if(!projection.point(add(hitbox_center(box),lead),center))return false;
     std::array<Point,3> simplex{};int count=1;
     double dx=-center.x,dy=-center.y;if(dx*dx+dy*dy<1e-12)dx=1;
@@ -140,7 +141,7 @@ inline bool closest(const Projection& projection,const Hitbox& box,Vec3 lead,Poi
     for(int iteration=0;iteration<32;++iteration) {
         double squared=out.x*out.x+out.y*out.y;if(squared<1e-10)break;
         Point next;if(!projection.support(box,lead,-out.x,-out.y,next))return false;
-        if(squared-(out.x*next.x+out.y*next.y)<=.02*std::sqrt(squared))break;
+        if(squared-(out.x*next.x+out.y*next.y)<=tolerance*std::sqrt(squared))break;
         simplex[count++]=next;
         if(count==3) {
             const auto& a=simplex[0];const auto& b=simplex[1];const auto& c=simplex[2];

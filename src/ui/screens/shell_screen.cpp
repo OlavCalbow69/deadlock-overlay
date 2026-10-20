@@ -86,6 +86,34 @@ constexpr int k_item_count = IM_ARRAYSIZE(k_items);
 
 static_assert(k_item_count == route_index(route::profile));
 
+shell_page overlay_page(route destination)
+{
+    switch (destination)
+    {
+    case route::assistant: return shell_page::camera;
+    case route::messages: return shell_page::vindicta_ult;
+    case route::patches: return shell_page::connection;
+    case route::tasks: return shell_page::test;
+    case route::presets: return shell_page::auto_parry;
+    case route::automation: return shell_page::auto_click;
+    default: return shell_page::health;
+    }
+}
+
+nav_item overlay_item(route destination)
+{
+    switch (overlay_page(destination))
+    {
+    case shell_page::camera: return {"Camera Focus", icons::id::crosshair_simple, nullptr, {}, 0};
+    case shell_page::vindicta_ult: return {"Vindicta Ultimate", icons::id::assassinate, nullptr, {}, 0};
+    case shell_page::connection: return {"Connection", icons::id::workflow, nullptr, {}, 0};
+    case shell_page::test: return {"Diagnostics", icons::id::code, nullptr, {}, 0};
+    case shell_page::auto_parry: return {"Auto Parry", icons::id::lock, nullptr, {}, 0};
+    case shell_page::auto_click: return {"Auto Click", icons::id::target, nullptr, {}, 0};
+    default: return {"Health bars", icons::id::eye, nullptr, {}, 0};
+    }
+}
+
 const char* page_title(route destination, int sub)
 {
     if (destination == route::profile)
@@ -241,8 +269,12 @@ bool menu_screen(float alpha, const shell_extension* extension)
         switch (*extension->active_page)
         {
         case shell_page::camera: s.active = route::assistant; break;
+        case shell_page::vindicta_ult: s.active = route::messages; break;
         case shell_page::health: s.active = route::settings; break;
         case shell_page::connection: s.active = route::patches; break;
+        case shell_page::test: s.active = route::tasks; break;
+        case shell_page::auto_parry: s.active = route::presets; break;
+        case shell_page::auto_click: s.active = route::automation; break;
         }
     }
     const float dt = ImGui::GetIO().DeltaTime;
@@ -362,18 +394,20 @@ bool menu_screen(float alpha, const shell_extension* extension)
 
         dl->PushClipRect(nav_box.Min, nav_box.Max, true);
 
-        for (int i = 0; i < k_item_count; i++)
+        constexpr int overlay_order[]={1,2,3,8,4,5,6,0,7,9};
+        for (int item_index = 0; item_index < k_item_count; item_index++)
         {
-            if (extension && i != route_index(route::assistant) && i != route_index(route::settings) && i != route_index(route::patches))
+            const int i=extension?overlay_order[item_index]:item_index;
+            if (extension && i != route_index(route::assistant) && i != route_index(route::messages)
+                && i != route_index(route::settings) && i != route_index(route::patches)
+                && i != route_index(route::tasks) && i != route_index(route::presets) && i != route_index(route::automation))
                 continue;
             nav_item item = k_items[i];
             if (extension)
-                item = {i == route_index(route::assistant) ? "Camera Focus" : i == route_index(route::settings) ? "Health bars" : "Connection",
-                        i == route_index(route::assistant) ? icons::id::crosshair_simple : i == route_index(route::settings) ? icons::id::eye : icons::id::workflow,
-                        nullptr, {nullptr, nullptr, nullptr}, 0};
+                item = overlay_item(route_from_index(i));
             item_anim& anim = s.items[i];
 
-            if (extension ? i == route_index(route::assistant) : i == k_group1_count)
+            if (extension ? (i == route_index(route::assistant)||i == route_index(route::automation)||i == route_index(route::patches)) : i == k_group1_count)
             {
                 y += px(6.f + k_group_gap + 4.f);
 
@@ -383,7 +417,8 @@ bool menu_screen(float alpha, const shell_extension* extension)
                     ImFont* f = font_medium(k_label_size);
                     draw_text_tracked(
                         dl, f, ImVec2(menu_x + px(8.f + label_dx), y + line_top(f, px(16.f))),
-                        mo::with_alpha(c_muted_foreground, label_a), "GAME", px(k_label_track));
+                        mo::with_alpha(c_muted_foreground, label_a),
+                        extension&&i==route_index(route::automation)?"AUTOMATION":extension&&i==route_index(route::patches)?"SYSTEM":"GAME", px(k_label_track));
                 }
                 y += px(k_label_h + k_label_mb);
             }
@@ -408,7 +443,7 @@ bool menu_screen(float alpha, const shell_extension* extension)
             {
                 s.active = route_from_index(i);
                 if (extension && extension->active_page)
-                    *extension->active_page = i == route_index(route::assistant) ? shell_page::camera : i == route_index(route::settings) ? shell_page::health : shell_page::connection;
+                    *extension->active_page = overlay_page(s.active);
                 if (item.sub_count > 0)
                 {
                     const bool open = anim.sub.mounted && !anim.sub.exiting;
@@ -685,7 +720,7 @@ bool menu_screen(float alpha, const shell_extension* extension)
                               mo::with_alpha(c_border, alpha));
 
             const int active_index = route_index(s.active);
-            const char* crumb_text = extension ? (s.active == route::assistant ? "Camera Focus" : s.active == route::patches ? "Connection" : "Health bars")
+            const char* crumb_text = extension ? overlay_item(s.active).label
                                               : page_title(s.active, s.sub_index[active_index]);
             draw_text(dl, f14,
                       ImVec2(ix + px(81.f), origin.y + px(22.f) + line_top(f14, px(leading_sm))),
@@ -758,7 +793,7 @@ bool menu_screen(float alpha, const shell_extension* extension)
                               ImVec2(plate.Max.x - px(29.f), origin.y + px(628.f)));
 
             if (extension && extension->content)
-                extension->content(s.active == route::assistant ? shell_page::camera : s.active == route::patches ? shell_page::connection : shell_page::health, body, alpha, extension->context);
+                extension->content(overlay_page(s.active), body, alpha, extension->context);
             else draw_page(s.active, page_title(s.active, s.sub_index[active_index]),
                       on_profile ? nullptr : current.sub, on_profile ? 0 : current.sub_count,
                       &s.sub_index[active_index], body, alpha);

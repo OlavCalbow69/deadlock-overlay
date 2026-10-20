@@ -19,11 +19,11 @@ inline bool vindicta(const HeroProfile& hero) {
     return hero.valid&&hero.id==3&&hero.token=="hero_hornet";
 }
 inline bool sniper_scope(float started) {return std::isfinite(started)&&started>0;}
-inline bool sniper_speed_active(const HeroProfile& hero,bool enabled) {
+inline bool sniper_profile_active(const HeroProfile& hero,bool enabled) {
     return enabled&&vindicta(hero)&&hero.sniper_present&&hero.sniper_valid&&hero.sniper_scoped;
 }
 inline float hero_focus_speed(const HeroProfile& hero,bool enabled,float normal,float sniper) {
-    auto speed=sniper_speed_active(hero,enabled)?sniper:normal;
+    auto speed=sniper_profile_active(hero,enabled)?sniper:normal;
     return std::isfinite(speed)?std::clamp(speed,1.f,120.f):12.f;
 }
 inline std::string hero_token(std::string_view name) {

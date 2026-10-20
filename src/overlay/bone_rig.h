@@ -5,6 +5,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "hitboxes.h"
 
 namespace overlay {
 struct BoneRig {
@@ -55,6 +56,32 @@ inline std::vector<std::string> rig_skeleton_names(const std::vector<std::string
     if(rig.prefix.empty())return names;
     std::vector<std::string> result(names.size());
     for(size_t i=0;i<names.size();++i)if(names[i].starts_with(rig.prefix))result[i]=names[i].substr(rig.prefix.size());
+    return result;
+}
+inline std::vector<AnatomicalRegion> rig_regions(const std::vector<std::string>& names,const std::vector<int16_t>& parents,const BoneRig& rig) {
+    auto normalized=rig_skeleton_names(names,rig);std::vector<AnatomicalRegion> result(names.size());
+    auto classify=[](std::string_view name) {
+        if(name=="head"||name.starts_with("head_")||name=="neck"||name.starts_with("neck_"))return AnatomicalRegion::Head;
+        if(name=="pelvis"||name.starts_with("pelvis_"))return AnatomicalRegion::Pelvis;
+        if(name=="chest"||name.starts_with("chest_")||name.starts_with("spine"))return AnatomicalRegion::Torso;
+        if(name.find("arm")!=name.npos||name.find("hand")!=name.npos||name.find("finger")!=name.npos
+            ||name.find("clavicle")!=name.npos||name.find("shoulder")!=name.npos||name.find("thigh")!=name.npos
+            ||name.find("calf")!=name.npos||name.find("leg")!=name.npos||name.find("foot")!=name.npos||name.find("toe")!=name.npos)return AnatomicalRegion::Limb;
+        return AnatomicalRegion::Unknown;
+    };
+    for(size_t i=0;i<names.size();++i) {
+        if(normalized[i].empty())continue;
+        const auto region=classify(normalized[i]);
+        if(region==AnatomicalRegion::Unknown)continue;
+        if(rig.pelvis<0){result[i]=region;continue;}
+        int parent=int(i);
+        for(size_t steps=0;parent>=0&&parent<int(names.size())&&steps<names.size();++steps) {
+            // Verify membership in the selected rig. An arbitrary child of a
+            // torso bone (weapon, cloth, helper) is not itself known anatomy.
+            if(parent==rig.pelvis){result[i]=region;break;}
+            if(size_t(parent)>=parents.size())break;parent=parents[parent];
+        }
+    }
     return result;
 }
 }

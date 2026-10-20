@@ -40,10 +40,10 @@ struct ReaderProfile {
 #undef PROFILE_VALUE
     } layout;
     bool automatic{};
-    std::string source{"built_in_6759"};
-    static constexpr const char* client_hash="b48636d0282a3f6916725e1701c0454738bb5a4903e83fc96a27b01dce800d23";
-    static constexpr const char* engine_hash="084c45473667c65174a9a19c428359ac335c3e990008dbf26c0eef91be44784c";
-    static constexpr const char* world_hash="bae38ed919214dcd74d49f9f01419f7ab2c86a57af666b4308f51241e9ff9888";
+    std::string source{"built_in_6774"};
+    static constexpr const char* client_hash="e2bafed8ebdfd239d506b4f59b24a09719f945c6a63f69766171349b886603d4";
+    static constexpr const char* engine_hash="e5e4b2df76ff88d99dd9217e4ccde09bcce9b963327b38963f3ae90ce7e55ac2";
+    static constexpr const char* world_hash="f2cd32e7336eeb00b1090cdca0c7327d4b245bb1a6ca3fe442081bb2dfb58ee1";
     bool load(const std::filesystem::path& file,const std::string& client,const std::string& engine,const std::string& world,
         uint32_t client_size,uint32_t engine_size,uint32_t world_size,std::string& error) {
         auto fail=[&](std::string why){error=std::move(why);return false;};
@@ -84,11 +84,22 @@ struct ReaderProfile {
             ||private_values.modifier_cache<0x214+2*(std::max(private_values.bullet_speed_index,private_values.bullet_override_index)+1))
             return fail("Invalid modifier cache layout");
         const auto& f=next.fields;
+        for(auto state:{private_values.state_stunned,private_values.state_sleep,private_values.state_command,private_values.state_zipline,
+            private_values.state_parry_disabled,private_values.state_urn,private_values.state_parry_active,private_values.state_force_parry,
+            private_values.state_ground_dash,private_values.state_air_dash,private_values.state_shooting_disabled,private_values.state_melee_disabled,
+            private_values.state_melee_debuff,private_values.state_parry_ignores_melee,private_values.state_charge_melee,
+            private_values.state_input_disabled,private_values.state_jump_disabled,private_values.state_aim_forward_pitch})if(state>=352)return fail("Modifier state exceeds supported mask");
+        if(private_values.melee_range_index>=1024||private_values.parry_pierce_index>=1024||private_values.melee_attack_stride<0x100
+            ||private_values.melee_attack_stride>0x2000||private_values.melee_attack_duration+4>=private_values.melee_attack_stride-24
+            ||private_values.ability_property_stride<0x80||private_values.ability_property_stride>=0x800||private_values.ability_property_stride%8
+            ||private_values.property_base_value+4>=private_values.ability_property_stride-24
+            ||private_values.property_cached_value+4>private_values.property_dirty||private_values.counterspell_armed>=0x400)
+            return fail("Invalid parry reader layout");
         auto span=[](std::initializer_list<uint32_t> offsets){auto [low,high]=std::minmax_element(offsets.begin(),offsets.end());return *high-*low<4090;};
         if(!span({f.scene_node,f.health,f.max_health,f.life_state,f.team})||!span({f.pawn_handle,f.local_controller})
             ||!span({f.hero_spawned+f.spawn_id,f.hero_loading+f.spawn_id,f.hero_unspawned})
             ||std::max({f.hero_spawned+f.spawn_id,f.hero_loading+f.spawn_id,f.hero_unspawned})>4092
-            ||f.collision_max!=f.collision_min+12||f.game_mode!=f.match_mode+4)
+            ||f.collision_max!=f.collision_min+12||f.game_mode!=f.match_mode+4||f.mouse_sensitivity!=f.fov_sensitivity+4)
             return fail("Schema fields do not fit the supported reader layout");
         next.automatic=true;next.source="generated:"+client.substr(0,12);*this=std::move(next);return true;
     }

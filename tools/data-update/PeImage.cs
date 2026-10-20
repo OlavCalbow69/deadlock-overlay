@@ -40,7 +40,7 @@ sealed class PeImage {
         return true;
     }
     public uint VirtualFunction(uint table, int slot) {
-        if (slot is < 0 or > 255) throw new InvalidDataException("Invalid virtual function slot");
+        if (slot is < 0 or > 511) throw new InvalidDataException("Invalid virtual function slot");
         ulong address = BinaryPrimitives.ReadUInt64LittleEndian(At(table + (uint)slot * 8, 8));
         if (address < Base || address - Base >= Size || !Executable((uint)(address - Base))) throw new InvalidDataException("Vtable function is outside DLL code");
         return (uint)(address - Base);
@@ -73,8 +73,9 @@ sealed class PeImage {
     // stride. Verify both neighboring records so an unrelated name reference
     // cannot be mistaken for the enum's numeric value.
     public uint ModifierValue(string name) {
-        const string prefix = "MODIFIER_VALUE_";
-        if (!name.StartsWith(prefix, StringComparison.Ordinal)) throw new InvalidDataException("Invalid modifier name");
+        string prefix=name.StartsWith("MODIFIER_VALUE_",StringComparison.Ordinal)?"MODIFIER_VALUE_"
+            :name.StartsWith("MODIFIER_STATE_",StringComparison.Ordinal)?"MODIFIER_STATE_":"";
+        if(prefix.Length==0)throw new InvalidDataException("Invalid modifier name");
         var needle = Encoding.ASCII.GetBytes(name + "\0");var prefixBytes = Encoding.ASCII.GetBytes(prefix);
         var names = new HashSet<uint>();var values = new HashSet<uint>();
         foreach (var s in Sections.Where(s => (s.Flags & 0x20000000) == 0)) {

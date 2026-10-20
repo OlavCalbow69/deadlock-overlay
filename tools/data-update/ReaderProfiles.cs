@@ -14,8 +14,10 @@ static class ReaderProfiles {
     sealed record Symbol(string Key, string Module, Recipe[] Recipes);
     sealed record Vtable(string Key, string Module, string Type);
     sealed record Witness(string Key, string Module, string Pattern);
-    sealed record Vfunc(string Key, string Module, string Vtable, int Slot, string Pattern);
-    sealed record Operand(int Offset, int Addend);
+    sealed record VfuncValue(string Key,int Offset,int Minimum,int Maximum,int Alignment);
+    sealed record VfuncCall(int Offset, string Target);
+    sealed record Vfunc(string Key, string Module, string Vtable, int Slot, string Pattern,VfuncValue[]? Values=null,int SlotRadius=0,VfuncCall[]? Calls=null);
+    sealed record Operand(int Offset, int Addend,int Width=4);
     sealed record LayoutValue(string Key, string Witness, Operand[] Operands, int Minimum, int Maximum, int Alignment);
     sealed record EnumValue(string Key, string Name);
     sealed record Manifest(int Version, string Layout, Symbol[] Symbols, Vtable[] Vtables, Witness[] Witnesses, Vfunc[] Vfuncs, LayoutValue[] Values, EnumValue[] Enums);
@@ -49,11 +51,16 @@ static class ReaderProfiles {
             string key=f.Groups[1].Value;
             uint width=key switch {
                 "scene_node" or "collision" or "modifier_property" or "model_handle" or "mesh_mask" or "hero_sort" or "hero_search"=>8,
-                "max_health" or "health" or "pawn_handle" or "disabled_groups" or "hero_unspawned" or "spawn_id" or "hero_id" or "sniper_scope" or "match_mode" or "game_mode"=>4,
-                "life_state" or "team" or "local_controller" or "dormant" or "hitbox_set"=>1,
-                "node_world"=>32,"hero_spawned" or "hero_loading"=>16,"abilities"=>24,"weapon_map"=>40,_=>0
+                "max_health" or "health" or "pawn_handle" or "disabled_groups" or "hero_unspawned" or "spawn_id" or "hero_id" or "sniper_scope" or "match_mode" or "game_mode" or "fov_sensitivity" or "mouse_sensitivity"=>4,
+                "life_state" or "team" or "local_controller" or "dormant" or "hitbox_set" or "slide_active" or "weapon_zoom"=>1,
+                "abs_velocity" or "eye_angles" or "melee_forced_angles"=>12,"node_world"=>32,"hero_spawned" or "hero_loading"=>16,"abilities" or "modifier_list"=>24,"weapon_map" or "melee_attacks" or "ability_properties"=>40,
+                "state_enabled" or "state_predicted"=>44,"ability_slot"=>2,
+                "simulation_time" or "owner_handle" or "modifier_ability" or "modifier_serial" or "ability_cooldown" or "ability_post_cast" or "parry_start" or "parry_success_end" or "parry_duration"
+                    or "melee_activated" or "melee_trigger" or "melee_state" or "melee_type" or "melee_state_start"
+                    or "orb_launch" or "orb_attackable" or "orb_end_attackable" or "orb_launch_number"=>4,
+                "modifier_disabled" or "modifier_ready" or "ability_cooling" or "ability_interrupt" or "melee_using" or "melee_tag" or "melee_hit" or "attack_parryable"=>1,_=>0
             };
-            string primitive=key switch {"max_health" or "health"=>"int32","life_state" or "team" or "hitbox_set"=>"uint8","local_controller" or "dormant"=>"bool","sniper_scope"=>"GameTime_t",_=>""};
+            string primitive=key switch {"max_health" or "health" or "orb_launch_number"=>"int32","life_state" or "team" or "hitbox_set"=>"uint8","local_controller" or "dormant" or "slide_active" or "weapon_zoom"=>"bool","fov_sensitivity" or "mouse_sensitivity"=>"float32","sniper_scope" or "orb_launch" or "orb_attackable" or "orb_end_attackable"=>"GameTime_t","abs_velocity"=>"Vector",_=>""};
             if(width!=0&&(!representations.TryGetValue(name,out var repr)||repr.Width!=width||(!string.IsNullOrEmpty(primitive)&&repr.Type!=primitive)))
                 throw new InvalidDataException("Schema field representation changed: "+name);
             values.Add("field." + f.Groups[1].Value, value);
@@ -89,9 +96,10 @@ static class ReaderProfiles {
             var witness = witnessLocations[item.Witness]; var resolved = new HashSet<uint>();
             if (item.Alignment <= 0 || item.Operands.Length == 0) throw new InvalidDataException("Invalid private value recipe");
             foreach (var operand in item.Operands) {
-                if (operand.Offset < 0 || operand.Offset + 4 > witness.Pattern.Length || witness.Pattern.Skip(operand.Offset).Take(4).Any(token => token != "?"))
+                if (operand.Width is not (1 or 4) || operand.Offset < 0 || operand.Offset + operand.Width > witness.Pattern.Length || witness.Pattern.Skip(operand.Offset).Take(operand.Width).Any(token => token != "?"))
                     throw new InvalidDataException("Private value operand is not a declared displacement");
-                long value = (long)BinaryPrimitives.ReadInt32LittleEndian(witness.Image.At(witness.Address + (uint)operand.Offset, 4)) - operand.Addend;
+                var bytes=witness.Image.At(witness.Address+(uint)operand.Offset,operand.Width);
+                long value=(operand.Width==1?bytes[0]:BinaryPrimitives.ReadInt32LittleEndian(bytes))-operand.Addend;
                 if (value < item.Minimum || value >= item.Maximum || value % item.Alignment != 0) throw new InvalidDataException("Private value outside supported bounds: " + item.Key);
                 resolved.Add((uint)value);
             }
@@ -102,11 +110,44 @@ static class ReaderProfiles {
             cancel.ThrowIfCancellationRequested();uint value = images["client"].ModifierValue(item.Name);
             values.Add("private." + item.Key, value);log($"Resolved {item.Name}: {value}");
         }
+        var virtualSlots = new Dictionary<string, (string Module, int Slot)>();
         foreach (var witness in manifest.Vfuncs) {
             cancel.ThrowIfCancellationRequested();var image = images[witness.Module];
-            uint function = image.VirtualFunction(values["address." + witness.Vtable], witness.Slot);
-            if (!image.MatchesAt(function, witness.Pattern)) throw new InvalidDataException("Private virtual layout " + witness.Key + " changed; reader review required");
-            log($"Private virtual layout {witness.Key}: verified at 0x{function:X}");
+            if(witness.Slot is < 0 or > 511 || witness.SlotRadius is < 0 or > 4)
+                throw new InvalidDataException("Invalid virtual slot search: " + witness.Key);
+            var pattern=witness.Pattern.Split(' ',StringSplitOptions.RemoveEmptyEntries);
+            foreach(var call in witness.Calls ?? []) {
+                if(call.Offset<2||call.Offset+4>pattern.Length||pattern[call.Offset-2]!="FF"||pattern[call.Offset-1]!="90"
+                    ||pattern.Skip(call.Offset).Take(4).Any(token=>token!="?")
+                    ||!virtualSlots.TryGetValue(call.Target,out var target)||target.Module!=witness.Module)
+                    throw new InvalidDataException("Invalid virtual call witness: " + witness.Key);
+            }
+            // A small reviewed search tolerates inserted virtual methods. The
+            // complete code witness must still identify exactly one slot.
+            var matches = new List<(int Slot,uint Function)>();
+            for(int slot=Math.Max(0,witness.Slot-witness.SlotRadius);slot<=Math.Min(511,witness.Slot+witness.SlotRadius);++slot) {
+                uint candidate;
+                try {candidate=image.VirtualFunction(values["address." + witness.Vtable],slot);if(!image.MatchesAt(candidate,witness.Pattern))continue;}
+                catch(InvalidDataException) {continue;}
+                bool callsMatch=true;
+                foreach(var call in witness.Calls ?? []) {
+                    int displacement=BinaryPrimitives.ReadInt32LittleEndian(image.At(candidate+(uint)call.Offset,4));
+                    if(displacement!=virtualSlots[call.Target].Slot*8){callsMatch=false;break;}
+                }
+                if(callsMatch)matches.Add((slot,candidate));
+            }
+            if(matches.Count!=1)throw new InvalidDataException($"Private virtual layout {witness.Key}: expected one verified slot, found {matches.Count}; reader review required");
+            var selected=matches[0];uint function=selected.Function;
+            virtualSlots.Add(witness.Key,(witness.Module,selected.Slot));
+            foreach(var item in witness.Values ?? []) {
+                if(item.Offset<0||item.Offset+4>pattern.Length||pattern.Skip(item.Offset).Take(4).Any(token=>token!="?")||item.Alignment<1)
+                    throw new InvalidDataException("Invalid virtual field resolver: "+item.Key);
+                int value=BinaryPrimitives.ReadInt32LittleEndian(image.At(function+(uint)item.Offset,4));
+                if(value<item.Minimum||value>=item.Maximum||value%item.Alignment!=0||!values.TryAdd("private."+item.Key,(uint)value))
+                    throw new InvalidDataException("Invalid or duplicate virtual field: "+item.Key);
+                log($"Resolved virtual field {item.Key}: 0x{value:X}");
+            }
+            log($"Private virtual layout {witness.Key}: verified slot {selected.Slot} at 0x{function:X}");
         }
         // Every address in the C++ contract must be generated; no missing value may fall back to an old RVA.
         foreach (Match a in Regex.Matches(contract, "PROFILE_ADDRESS\\((\\w+),")) if (!values.ContainsKey("address." + a.Groups[1].Value)) throw new InvalidDataException("Unresolved address: " + a.Groups[1].Value);

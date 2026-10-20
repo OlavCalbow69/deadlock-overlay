@@ -2,6 +2,9 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+
 namespace solace::icons
 {
 
@@ -48,8 +51,12 @@ enum class id
     log_out,
     plus,
     crosshair_simple,
+    assassinate,
+    code,
 };
 
+void initialize_textures(ID3D11Device* device, ID3D11DeviceContext* context);
+void shutdown_textures();
 void draw(id which, ImDrawList* dl, const ImVec2& top_left, float box, ImU32 col);
 
 void user(ImDrawList* dl, const ImVec2& top_left, float box, ImU32 col);

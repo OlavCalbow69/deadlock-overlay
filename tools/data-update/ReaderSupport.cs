@@ -5,8 +5,8 @@ sealed record SchemaValidation(string ClientSha256, string EngineSha256, int Fie
 static class ReaderSupport {
     // Baseline comparison for dump reports and the compiled fallback reader.
     // New builds are accepted by ReaderProfiles after code and live validation.
-    public const string ClientHash = "B48636D0282A3F6916725E1701C0454738BB5A4903E83FC96A27B01DCE800D23";
-    public const string EngineHash = "084C45473667C65174A9A19C428359AC335C3E990008DBF26C0EEF91BE44784C";
+    public const string ClientHash = "E2BAFED8EBDFD239D506B4F59B24A09719F945C6A63F69766171349B886603D4";
+    public const string EngineHash = "E5E4B2DF76FF88D99DD9217E4CCDE09BCCE9B963327B38963F3AE90CE7E55AC2";
     public static readonly (string Class, string Field, uint Offset)[] Required = [
         ("C_BaseEntity", "m_pGameSceneNode", 0x330),
         ("C_BaseEntity", "m_pCollision", 0x340),

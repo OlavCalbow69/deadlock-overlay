@@ -17,7 +17,7 @@ target_compile_definitions(solace PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AN
 target_compile_options(solace PRIVATE /utf-8 /bigobj /MP)
 target_link_libraries(solace PUBLIC d3d11 d3dcompiler dxgi dcomp dwmapi windowscodecs
   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/freetype/win64/freetype.lib")
-add_executable(DeadlockOverlay src/overlay/main.cpp src/overlay/game_reader.cpp)
+add_executable(DeadlockOverlay src/overlay/main.cpp src/overlay/game_reader.cpp src/overlay/game_reader_parry.cpp)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/overlay/reader_profile_values.inc" READER_CONTRACT)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tools/data-update/reader-signatures.json" READER_SIGNATURES)
 string(REPLACE "\r\n" "\n" READER_CONTRACT "${READER_CONTRACT}")

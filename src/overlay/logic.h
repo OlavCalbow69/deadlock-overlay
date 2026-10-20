@@ -9,15 +9,6 @@ struct Vec3 { float x{}, y{}, z{}; };
 using Matrix = std::array<float, 16>;
 struct ScreenPoint { float x{}, y{}; };
 struct BarRect {float left{},top{},right{},bottom{};};
-inline BarRect bar_rect(ScreenPoint p,float length,float thickness,float gap,float scale) {
-    length*=scale;thickness*=scale;gap*=scale;
-    return {p.x-length/2,p.y-gap-thickness,p.x+length/2,p.y-gap};
-}
-inline BarRect bar_fill(BarRect rect,float fill) {
-    fill=std::clamp(fill,0.f,1.f);
-    rect.right=rect.left+(rect.right-rect.left)*fill;
-    return rect;
-}
 inline bool finite(Vec3 p) {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
 }
@@ -44,6 +35,9 @@ inline bool fresh(uint64_t now, uint64_t sampled) {
 inline int select_anchor(int head_end, int head) { return head_end >= 0 ? head_end : head; }
 inline bool include_player(bool exclude_teammates,uint8_t local_team,uint8_t player_team) {
     return !exclude_teammates||local_team<2||player_team<2||local_team!=player_team;
+}
+inline bool enemy_teams(uint8_t local_team,uint8_t player_team) {
+    return local_team>=2&&local_team<=3&&player_team>=2&&player_team<=3&&local_team!=player_team;
 }
 inline bool render_active(bool game_exists, bool minimized, bool game_foreground, bool menu_open, bool menu_foreground) {
     return game_exists && !minimized && (game_foreground || (menu_open && menu_foreground));
