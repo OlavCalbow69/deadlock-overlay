@@ -4,10 +4,10 @@
 #include <vector>
 
 namespace overlay {
-enum class ParryThreatKind { None, LightMelee, HeavyMelee, SpellProjectile };
+enum class ParryThreatKind { None, LightMelee, HeavyMelee, SpellProjectile, PuddlePunch };
 inline const char* parry_threat_name(ParryThreatKind kind) {
     switch(kind){case ParryThreatKind::LightMelee:return "Light melee";case ParryThreatKind::HeavyMelee:return "Heavy melee";
-    case ParryThreatKind::SpellProjectile:return "Spell projectile";default:return "None";}
+    case ParryThreatKind::PuddlePunch:return "Puddle Punch";case ParryThreatKind::SpellProjectile:return "Spell projectile";default:return "None";}
 }
 struct MeleeThreatSample {
     uint32_t pawn{},ability{};uint8_t team{};

@@ -34,7 +34,10 @@ inline AdaptivePoint adaptive_closest(const Snapshot& s,const FocusTarget& targe
     }
     struct Candidate {AdaptivePoint point;Vec3 center;};
     std::array<Candidate,512> candidates{};size_t count{};bool geometry=false;
-    const auto matrix=angular_projection(s.matrix);hitbox_focus::Projection projection(matrix,2,2,{1,1});
+    const auto matrix=angular_projection(s.matrix);const float focal_x=std::sqrt(s.matrix[0]*s.matrix[0]+s.matrix[1]*s.matrix[1]+s.matrix[2]*s.matrix[2]);
+    const float focal_y=std::sqrt(s.matrix[4]*s.matrix[4]+s.matrix[5]*s.matrix[5]+s.matrix[6]*s.matrix[6]);
+    const float focal_w=std::sqrt(s.matrix[12]*s.matrix[12]+s.matrix[13]*s.matrix[13]+s.matrix[14]*s.matrix[14]);
+    hitbox_focus::Projection projection(matrix,2,2,{1+2*focus_reference_offset.x*focal_w/focal_x,1+2*focus_reference_offset.y*focal_w/focal_y});
     for(size_t i=0;i<target.hitboxes.size()&&count<candidates.size();++i) {
         const auto& box=target.hitboxes[i];if(!adaptive_permits(target,box,settings,bone))continue;geometry=true;
         double time{};bool inside=hitbox_focus::intersect(box,lead,basis.origin,basis.forward,time);Vec3 world{};
@@ -44,11 +47,17 @@ inline AdaptivePoint adaptive_closest(const Snapshot& s,const FocusTarget& targe
         candidates[count++]={{world,error,box.source_id,box.region,int(i),false,inside,true},add(hitbox_center(box),lead)};
     }
     AdaptivePoint best,previous,preferred;best.geometry=geometry;
+    uint64_t preferred_id{};float preferred_distance=FLT_MAX;
+    if(target.preferred_joint>=0&&target.preferred_joint<16&&(target.joints_valid&(1u<<target.preferred_joint))) {
+        const auto joint=add(target.joints[target.preferred_joint],lead);
+        for(size_t i=0;i<count;++i){auto delta=sub(candidates[i].center,joint);float d=dot(delta,delta);
+            if(d<preferred_distance){preferred_distance=d;preferred_id=candidates[i].point.source_id;}}
+    }
     auto consider=[&](AdaptivePoint point) {
         point.distance=point.error.distance;
         if(!best.valid||point.distance<best.distance)best=point;
         if(point.source_id==previous_id&&(!previous.valid||point.distance<previous.distance))previous=point;
-        if(point.region==preferred_region(bone)&&(!preferred.valid||point.distance<preferred.distance))preferred=point;
+        if((preferred_id?point.source_id==preferred_id:point.region==preferred_region(bone))&&(!preferred.valid||point.distance<preferred.distance))preferred=point;
     };
     auto stable=[&]() {
         const float nearest=best.distance;
@@ -112,8 +121,8 @@ inline AdaptiveFocusSolution build_adaptive_solution(const Snapshot& s,const Foc
         const bool valid_motion=motion.velocity_valid&&age>=0&&age<=50;
         result.prediction_status=settings.adaptive.prediction?"Prediction waiting for motion":"Prediction off";
         if(settings.adaptive.prediction&&valid_motion) {
-            const bool projectile_valid=sniper||s.weapon.valid;
-            const float inheritance=sniper?0:s.weapon.inheritance;
+            const bool projectile_valid=sniper||(settings.tracking.enabled&&settings.tracking.fixed_lead)||s.weapon.valid;
+            const float inheritance=(sniper||(settings.tracking.enabled&&settings.tracking.fixed_lead))?0:s.weapon.inheritance;
             const bool local_valid=inheritance==0||s.local_motion.velocity_valid;
             if(projectile_valid&&local_valid) {
                 result.data_age_ms=float(age+std::clamp(queue_ms,0.,20.));
@@ -126,7 +135,7 @@ inline AdaptiveFocusSolution build_adaptive_solution(const Snapshot& s,const Foc
                     auto candidate=adaptive_closest(s,target,settings.adaptive,settings.focus_bone,lead,settings.visible_only,previous_hitbox);
                     if(!candidate.valid){solved=false;blocked=true;break;}point=candidate;
                     float flight{};
-                    if(!sniper&&!intercept(basis.origin,add(sub(point.world,lead),age_lead),relative,s.weapon.speed,flight)){solved=false;break;}
+                    if(!sniper){if(settings.tracking.enabled&&settings.tracking.fixed_lead)flight=settings.tracking.lead;else if(!intercept(basis.origin,add(sub(point.world,lead),age_lead),relative,s.weapon.speed,flight)){solved=false;break;}}
                     result.flight_time=flight;Vec3 next=add(age_lead,mul(relative,flight));
                     if(dot(sub(next,lead),sub(next,lead))<.001f){lead=next;break;}lead=next;
                 }
@@ -238,7 +247,7 @@ public:
     const FocusTarget* choose(const Snapshot& s,const CameraFocusSettings& settings,double now,AdaptivePoint& base) {
         prepare(s,settings);
         const FocusTarget* selected=nullptr;
-        if(target_) {
+        if(target_&&!(settings.tracking.enabled&&!settings.tracking.lock_subject)) {
             for(const auto& p:s.players)if(p.handle==target_){selected=&p;break;}
             if(!selected)for(const auto& p:s.focus_targets)if(p.handle==target_){selected=&p;break;}
             if(!selected||!candidate_allowed(*selected,s,settings)) {lose(now);status="Target lost / selecting next target";return nullptr;}
@@ -251,7 +260,7 @@ public:
             }
             base=adaptive_closest(s,*selected,settings.adaptive,settings.focus_bone,{},false,hitbox_,false);
             if(!base.geometry){clear_motion();solution={};status="Permitted hitbox region unavailable";return nullptr;}
-            if(!base.valid||(!zone_active_&&base.distance>settings.adaptive.radius_degrees*1.3f)){lose(now);status="Outside retention area";return nullptr;}
+            if(!base.valid||(!zone_active_&&!adaptive_area_accepts(s.matrix,base.world,settings.adaptive,base.distance,true))){lose(now);status="Outside retention area";return nullptr;}
         }else {
             if(now<acquire_after_){status="Waiting to select next target";return nullptr;}
             double best=std::numeric_limits<double>::max();int lowest=INT_MAX;unsigned ties{};bool geometry_seen=false;
@@ -265,7 +274,7 @@ public:
                     if(cached==zone_candidates_.end())return;point=cached->point;
                 }else {
                     point=adaptive_closest(s,candidate,settings.adaptive,settings.focus_bone,{},false,0,false);
-                    geometry_seen|=point.geometry;if(!point.valid||point.distance>settings.adaptive.radius_degrees)return;
+                    geometry_seen|=point.geometry;if(!point.valid||!adaptive_area_accepts(s.matrix,point.world,settings.adaptive,point.distance))return;
                 }
                 const double distance=std::round(double(point.distance)*1000.);const int health=candidate.maximum>0&&candidate.health>=0?candidate.health:INT_MAX;
                 if(settings.visible_only&&!zone_active_) {
@@ -279,7 +288,7 @@ public:
             for(const auto& p:s.players)consider(p);for(const auto& p:s.focus_targets)consider(p);
             if(!selected){solution={};status=zone_active_?(geometry_seen?"Hold and enter a Target Zone":zone_status_)
                 :geometry_seen?"Hold and enter the angular acquisition area":"Waiting for permitted hitboxes";return nullptr;}
-            target_=selected->handle;hitbox_=base.source_id;clear_motion();
+            const bool changed=target_!=selected->handle;target_=selected->handle;hitbox_=base.source_id;if(changed)clear_motion();
         }
         return selected;
     }
@@ -320,6 +329,7 @@ public:
         const long x=correction.x,y=correction.y;
         status=next.prediction_status;
         if(!x&&!y)return;
+        tracking_motion.error=std::hypot(correction.remaining.x,correction.remaining.y);
         if(input.move(game,x,y,activation.button))++moves;
         else {++input_failures;input_blocked_=true;clear_motion();status="Input failed / release the focus button";}
     }

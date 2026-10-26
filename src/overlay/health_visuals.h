@@ -26,6 +26,10 @@ inline std::string health_visuals_key_name(int key) {
     switch(key) {
     case VK_LBUTTON:return "Left mouse";case VK_RBUTTON:return "Right mouse";
     case VK_MBUTTON:return "Middle mouse";case VK_XBUTTON1:return "Mouse X1";case VK_XBUTTON2:return "Mouse X2";
+    case VK_PRIOR:return "Page Up";case VK_NEXT:return "Page Down";case VK_HOME:return "Home";case VK_END:return "End";
+    case VK_UP:return "Up arrow";case VK_DOWN:return "Down arrow";case VK_LEFT:return "Left arrow";case VK_RIGHT:return "Right arrow";
+    case VK_SHIFT:case VK_LSHIFT:case VK_RSHIFT:return "Shift";case VK_CONTROL:case VK_LCONTROL:case VK_RCONTROL:return "Ctrl";
+    case VK_MENU:case VK_LMENU:case VK_RMENU:return "Alt";
     }
     const UINT scan=MapVirtualKeyW(UINT(key),MAPVK_VK_TO_VSC_EX);
     const LONG param=LONG((scan&255)<<16)|((scan&0xff00)?(1L<<24):0);

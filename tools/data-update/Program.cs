@@ -9,7 +9,7 @@ using Microsoft.Win32;
 
 if (args.Contains("--self-test")) return UpdateTests.Run();
 var options = Options.Parse(args);
-if (options is null) { Console.Error.WriteLine("Usage: DeadlockDataUpdate --mode maps|schema|all|profile --root <exe-directory> --job <job-directory> [--project <project-directory>] [--parent <pid>] [--maps <map-directory>]"); return 2; }
+if (options is null) { Console.Error.WriteLine("Usage: DeadlockDataUpdate --mode maps|icons|schema|all|profile --root <exe-directory> --job <job-directory> [--project <project-directory>] [--parent <pid>] [--maps <map-directory>]"); return 2; }
 using var cancellation = new CancellationTokenSource();
 using var monitorStop = new CancellationTokenSource();
 var updater = new DataUpdater(options, cancellation.Token);
@@ -34,7 +34,7 @@ sealed record Options(string Mode, string Root, string Project, string Job, int 
         for (int i = 0; i < args.Length; i += 2) {
             if (i + 1 >= args.Length || !args[i].StartsWith("--") || !values.TryAdd(args[i], args[i + 1])) return null;
         }
-        if (!values.TryGetValue("--mode", out var mode) || mode is not ("maps" or "schema" or "all" or "profile") ||
+        if (!values.TryGetValue("--mode", out var mode) || mode is not ("maps" or "icons" or "schema" or "all" or "profile") ||
             !values.TryGetValue("--root", out var root) || !values.TryGetValue("--job", out var job)) return null;
         int parent = 0;
         if (values.TryGetValue("--parent", out var p) && (!int.TryParse(p, out parent) || parent < 0)) return null;
@@ -128,6 +128,7 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
     int mapUpdated, mapCurrent, mapSkipped, mapFailed;
     bool dumpReady, readerReady, completedMaps;
     string readerIssue = "";
+    string assetIssue = "";
     string schemaDirectory = "";
     int progress;
     string Project => File.Exists(Path.Combine(options.Project, "CMakeLists.txt")) ? options.Project : options.Root;
@@ -154,6 +155,17 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
             Log("Installed maps: " + maps);
             Log("Project data: " + Project);
             if (options.Mode is "maps" or "all") InstallMaps(maps);
+            if (options.Mode is "maps" or "icons" or "all") {
+                try { InstallIcons(maps); }
+                catch(OperationCanceledException){throw;}
+                catch(Exception e){assetIssue="Icons: "+e.Message;Log("Icon export failed; existing catalog retained: "+e.Message);}
+                try { InstallPreview(maps); }
+                catch(OperationCanceledException){throw;}
+                catch(Exception e){assetIssue+=(assetIssue.Length>0?"; ":"")+"Preview: "+e.Message;Log("Hero preview export failed; existing model retained: "+e.Message);}
+                try { InstallLanePaths(maps); }
+                catch(OperationCanceledException){throw;}
+                catch(Exception e){assetIssue+=(assetIssue.Length>0?"; ":"")+"Map lanes: "+e.Message;Log("Map lane export failed: "+e.Message);}
+            }
             if (options.Mode is "schema" or "all") {
                 try { await DumpSchema(maps); }
                 catch (OperationCanceledException) { throw; }
@@ -170,14 +182,16 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
                 await UpdateReaderProfile(game);
             }
             cancellation.ThrowIfCancellationRequested();
-            string message = options.Mode == "maps" ? $"Maps ready: {mapUpdated} installed, {mapCurrent} current, {mapSkipped} without physics."
+            string message = options.Mode=="icons"?(assetIssue.Length==0?"Game icons and hero preview refreshed.":"Local asset update incomplete; see report."):options.Mode == "maps" ? $"Maps ready: {mapUpdated} installed, {mapCurrent} current, {mapSkipped} without physics."
                 : !readerReady ? "Data saved. Reader profile not installed: " + readerIssue
                 : "Game data and reader profile updated. Reader reloads automatically.";
             if (options.Mode == "schema" && readerReady) message = "Schema and reader profile updated. Reader reloads automatically.";
             if (mapFailed > 0) message += $" {mapFailed} map export(s) failed; see report.";
+            if(assetIssue.Length>0)message+=" Assets: "+assetIssue;
             Log(message);
-            Status(mapFailed > 0 || (options.Mode != "maps" && !readerReady) ? "warnings" : "complete", "Finished", message, 100);
-            return mapFailed > 0 || (options.Mode != "maps" && !readerReady) ? 1 : 0;
+            bool failed=mapFailed>0||assetIssue.Length>0||(options.Mode is not ("maps" or "icons")&&!readerReady);
+            Status(failed ? "warnings" : "complete", "Finished", message, 100);
+            return failed ? 1 : 0;
         } catch (OperationCanceledException) { Log("Update cancelled; previously published data retained."); Status("cancelled", "Cancelled", "Update cancelled. Successfully installed maps are retained.", progress); return 3; }
         catch (Exception e) { Log(e.ToString()); Status("failed", "Update failed", e.Message, progress); return 1; }
         finally { ownership.Release(); }
@@ -187,6 +201,70 @@ sealed class DataUpdater(Options options, CancellationToken cancellation) {
         if (name.EndsWith("_dir", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
         if (!Regex.IsMatch(name, "^[A-Za-z0-9_-]{1,96}$")) throw new InvalidDataException("Unsupported map name: " + name);
         return name.ToLowerInvariant();
+    }
+    void InstallIcons(string maps) {
+        var vpk=Path.Combine(Directory.GetParent(maps)!.FullName,"pak01_dir.vpk");
+        var canonical=Path.Combine(Project,"data","icons");var runtime=Path.Combine(options.Root,"data","icons");
+        var fingerprint=GameAssetExport.Version+":"+Files.Hash(vpk);
+        var stamp=Path.Combine(canonical,"source.sha256");
+        if(!File.Exists(stamp)||File.ReadAllText(stamp)!=fingerprint||!IconsPresent(canonical)) {
+            var parent=Path.Combine(Project,"data","icon-staging");var staged=Path.Combine(parent,Path.GetFileName(options.Job));Directory.CreateDirectory(staged);
+            try {
+                Status("running","Game icons","Exporting hero, NPC and minimap assets...",progress);
+                var result=GameAssetExport.Run(vpk,staged,false,cancellation);
+                if(result.failed>0)throw new InvalidDataException($"{result.failed} game image export(s) failed; see icon manifest");
+                Files.AtomicText(Path.Combine(staged,"source.sha256"),fingerprint);cancellation.ThrowIfCancellationRequested();
+                // Publish individual assets atomically, then the catalog last.
+                // Windows thumbnail/indexing handles can prevent renaming the
+                // whole icon directory while the overlay uses it.
+                foreach(var file in Directory.EnumerateFiles(staged,"*",SearchOption.AllDirectories).Where(p=>Path.GetFileName(p) is not ("runtime.tsv" or "source.sha256"))) {
+                    cancellation.ThrowIfCancellationRequested();Files.AtomicCopy(file,Path.Combine(canonical,Path.GetRelativePath(staged,file)));
+                }
+                Files.AtomicCopy(Path.Combine(staged,"runtime.tsv"),Path.Combine(canonical,"runtime.tsv"));
+                Files.AtomicCopy(Path.Combine(staged,"source.sha256"),stamp);
+                Log($"Game icons: exported {result.exported} textures/vectors; {result.coverage.heroes} hero definitions.");
+            }finally{Files.DeleteTree(staged,parent);}
+        }else Log("Game icons: installed VPK catalog is current.");
+        if(!Path.GetFullPath(canonical).Equals(Path.GetFullPath(runtime),StringComparison.OrdinalIgnoreCase)) {
+            var runtimeStamp=Path.Combine(runtime,"source.sha256");
+            if(File.Exists(runtimeStamp)&&File.ReadAllText(runtimeStamp)==fingerprint&&IconsPresent(runtime)){Log("Runtime game icons are current.");return;}
+            foreach(var file in Directory.EnumerateFiles(canonical,"*",SearchOption.AllDirectories).Where(p=>Path.GetFileName(p) is not ("runtime.tsv" or "source.sha256"))) {
+                cancellation.ThrowIfCancellationRequested();Files.AtomicCopy(file,Path.Combine(runtime,Path.GetRelativePath(canonical,file)));
+            }
+            Files.AtomicCopy(Path.Combine(canonical,"runtime.tsv"),Path.Combine(runtime,"runtime.tsv"));
+            Files.AtomicCopy(stamp,runtimeStamp);
+        }
+    }
+    static bool IconsPresent(string directory) {
+        try {
+            if(!File.Exists(Path.Combine(directory,"runtime.tsv")))return false;
+            var manifest=JsonSerializer.Deserialize<List<IconResult>>(File.ReadAllText(Path.Combine(directory,"manifest.json")));
+            return manifest is {Count:>0 and <8192}&&manifest.All(r=>r.error==null&&r.file!=null&&Files.Within(Path.Combine(directory,r.file),directory)&&File.Exists(Path.Combine(directory,r.file)));
+        }catch{return false;}
+    }
+    void InstallLanePaths(string maps) {
+        var canonical=Path.Combine(Project,"data","map-lanes");var runtime=Path.Combine(options.Root,"data","map-lanes");
+        foreach(var archive in Directory.GetFiles(maps,"*.vpk")) {
+            cancellation.ThrowIfCancellationRequested();int paths=MapLaneExport.Export(archive,canonical,cancellation);
+            if(paths>0)Log($"Map lanes: {Path.GetFileNameWithoutExtension(archive)}: {paths} paths from installed entities.");
+        }
+        if(Directory.Exists(canonical))foreach(var source in Directory.GetFiles(canonical))Files.AtomicCopy(source,Path.Combine(runtime,Path.GetFileName(source)));
+    }
+    void InstallPreview(string maps) {
+        var vpk=Path.Combine(Directory.GetParent(maps)!.FullName,"pak01_dir.vpk");
+        var canonical=Path.Combine(Project,"data","preview");var runtime=Path.Combine(options.Root,"data","preview");
+        var fingerprint=GamePreviewExport.Version+":"+Files.Hash(vpk);var stamp=Path.Combine(canonical,"source.sha256");var model=Path.Combine(canonical,"vindicta.vpreview");
+        if(!File.Exists(stamp)||File.ReadAllText(stamp)!=fingerprint||!File.Exists(model)) {
+            var parent=Path.Combine(Project,"data","preview-staging");var staged=Path.Combine(parent,Path.GetFileName(options.Job));Directory.CreateDirectory(staged);
+            try {
+                Status("running","Hero preview","Exporting Vindicta model, materials and rig...",progress);GamePreviewExport.Export(vpk,staged,cancellation);
+                Files.AtomicCopy(Path.Combine(staged,"vindicta.vpreview"),model);Files.AtomicText(stamp,fingerprint);Log("Hero preview: exported current model, materials, bones and hitboxes.");
+            }finally{Files.DeleteTree(staged,parent);}
+        }
+        if(!Path.GetFullPath(canonical).Equals(Path.GetFullPath(runtime),StringComparison.OrdinalIgnoreCase)) {
+            var destination=Path.Combine(runtime,"vindicta.vpreview");var runtimeStamp=Path.Combine(runtime,"source.sha256");
+            if(!File.Exists(destination)||!File.Exists(runtimeStamp)||File.ReadAllText(runtimeStamp)!=fingerprint){Files.AtomicCopy(model,destination);Files.AtomicCopy(stamp,runtimeStamp);}
+        }
     }
     public static bool CurrentMesh(string mesh, string sourceHash) {
         try {

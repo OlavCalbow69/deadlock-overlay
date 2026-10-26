@@ -5,6 +5,8 @@
 #include "ui/foundation/rounded_panel.h"
 #include "ui/controls/form_controls.h"
 #include "ui/controls/widgets.h"
+#include "external_ui.h"
+#include "hud_style.h"
 #include <shellapi.h>
 
 namespace overlay {
@@ -35,7 +37,7 @@ inline void session_plot(ImDrawList* draw, const SessionMonitor& monitor, const 
 }
 
 inline bool draw_session_monitor(SessionMonitor& monitor, const Snapshot& snap,
-    const ImRect& body, float alpha, bool transparent, bool& show_hud,
+    const ImRect& body, float alpha, bool transparent,
     bool input_ready, const std::string& input_status, const std::filesystem::path& reports, HWND owner) {
     using namespace solace;
     const auto origin = body.Min;
@@ -170,7 +172,7 @@ inline bool draw_session_monitor(SessionMonitor& monitor, const Snapshot& snap,
     ImGui::PushID("session_monitor");
     auto button = [&](const char* title, float x, float width) {
         ImGui::SetCursorScreenPos(tools.Min + px(x, 44));
-        return ImGui::Button(title, px(width, 30));
+        return extra_action(title,px(width),false,px(30));
     };
     if (button(monitor.frozen ? "Resume" : "Freeze", 18, 88)) monitor.frozen = !monitor.frozen;
     if (button("Reset history", 114, 118)) monitor.reset();
@@ -181,33 +183,16 @@ inline bool draw_session_monitor(SessionMonitor& monitor, const Snapshot& snap,
         else if (reinterpret_cast<INT_PTR>(ShellExecuteW(owner, L"open", reports.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
             monitor.export_status = "Windows could not open the reports folder.";
     }
-    const auto hud_at = ImVec2{tools.Max.x - px(198), tools.Min.y + px(51)};
-    text(hud_at, "Show HUD", true, 12);
-    const bool changed = switch_toggle("monitor_hud", {tools.Max.x - px(66), tools.Min.y + px(47)}, &show_hud);
     clipped_text(tools.Min + px(18, 87), tools.GetWidth() - px(36), monitor.export_status.c_str(), true, 11);
     ImGui::PopID();
-    return changed;
+    return false;
 }
 
-inline void draw_session_hud(ImDrawList* draw, const SessionMonitor& monitor, float width, float scale) {
+inline void draw_session_hud(ImDrawList* draw, const SessionMonitor& monitor, float width, float scale,float opacity=1) {
     const auto& p = monitor.latest;
-    const ImVec2 origin{width - 296.f * scale, 20.f * scale};
-    const ImVec2 size{276.f * scale, 96.f * scale};
-    draw->AddRectFilled(origin, origin + size, IM_COL32(15, 20, 28, 210), 10.f * scale);
-    draw->AddRect(origin, origin + size, IM_COL32(83, 159, 245, 100), 10.f * scale, 0, scale);
-    char label[100]{};
-    auto text = [&](float y, const char* value, ImU32 color) {
-        draw->AddText(ImGui::GetFont(), 13.f * scale, origin + ImVec2{12.f * scale, y * scale}, color, value);
-    };
-    snprintf(label, sizeof(label), "OVERLAY  %.0f FPS / %.0f Hz", p.fps, p.refresh_hz);
-    text(10, label, IM_COL32(235, 242, 255, 255));
-    if (p.current_data) snprintf(label, sizeof(label), "READ %.2f ms / AGE %.0f ms", p.read_ms, p.age_ms);
-    else snprintf(label, sizeof(label), "GAME DATA STALE");
-    text(30, label, IM_COL32(170, 183, 201, 255));
-    snprintf(label, sizeof(label), "RAM %.0f MB / CPU %.1f%%", p.private_mb, p.cpu_percent);
-    text(50, label, IM_COL32(170, 183, 201, 255));
-    session_plot(draw, monitor, {origin + ImVec2{12.f * scale, 72.f * scale}, origin + size - ImVec2{12.f * scale, 8.f * scale}},
-        std::max(60., p.refresh_hz * 1.1), IM_COL32(83, 159, 245, 220),
-        [](const SessionMetric& point) { return point.fps; }, [](const SessionMetric& point) { return point.rendering; }, scale);
+    char value[32]{},detail[96]{};snprintf(value,sizeof(value),"%.0f FPS",p.fps);
+    if(p.current_data)snprintf(detail,sizeof(detail),"Read %.2f ms  /  Input %.1f ms",p.read_ms,p.input_queue_ms);
+    else strcpy_s(detail,"Game data stale");
+    draw_hud_card(draw,{width-(hud_card_width+24)*scale,24*scale},scale,"Session",value,detail,HudGlyph::Activity,p.current_data?solace::c_foreground:hud_warning(),opacity);
 }
 } // namespace overlay

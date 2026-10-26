@@ -7,7 +7,13 @@ struct CameraBasis {Vec3 origin{},right{},up{},forward{};};
 inline bool camera_basis(const Matrix& m,CameraBasis& b) {
     if(!projection_info(m).valid||!camera_origin(m,b.origin))return false;
     auto unit=[](Vec3 v){return mul(v,1/std::sqrt(dot(v,v)));};
-    b.right=unit({m[0],m[1],m[2]});b.up=unit({m[4],m[5],m[6]});b.forward=unit({m[12],m[13],m[14]});return true;
+    b.right=unit({m[0],m[1],m[2]});b.up=unit({m[4],m[5],m[6]});b.forward=unit({m[12],m[13],m[14]});
+    if(focus_reference_offset.x!=0||focus_reference_offset.y!=0) {
+        const float x=std::sqrt(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]),y=std::sqrt(m[4]*m[4]+m[5]*m[5]+m[6]*m[6]),w=std::sqrt(m[12]*m[12]+m[13]*m[13]+m[14]*m[14]);
+        b.forward=unit(add(add(b.forward,mul(b.right,2*focus_reference_offset.x*w/x)),mul(b.up,-2*focus_reference_offset.y*w/y)));
+        b.right=unit(cross(b.up,b.forward));b.up=unit(cross(b.forward,b.right));
+    }
+    return true;
 }
 struct AngularError {float x{},y{},distance{};};
 inline AngularError direction_error(const CameraBasis& basis,Vec3 direction) {

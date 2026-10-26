@@ -1,4 +1,16 @@
 #include "game_reader.h"
+#include "external_settings.h"
+#include "external_diagnostics.h"
+#include "overlay_huds.h"
+#include "world_visuals.h"
+#include "model_preview.h"
+#include "auto_select_ui.h"
+#include "external_ui.h"
+#include "hud_ui.h"
+#include "preset_ui.h"
+#include "preset_store.h"
+#include "extended_camera.h"
+#include "tracking_ui.h"
 #include "replay_camera.h"
 #include "camera_profile.h"
 #include "ray_click.h"
@@ -9,6 +21,7 @@
 #include "target_zone_outline.h"
 #include "health_visuals.h"
 #include "frame_pacing.h"
+#include "render_limit.h"
 #include "game_frames.h"
 #include "data_update.h"
 #include "session_monitor_ui.h"
@@ -47,6 +60,7 @@ double clock_ms(){return std::chrono::duration<double,std::milli>(std::chrono::s
 bool prefer_composition=true;
 bool high_priority=true;
 bool menu_preview_mode=false;
+int menu_preview_popup{};
 std::atomic_bool shutdown_requested{false};
 HANDLE shutdown_complete{};
 BOOL WINAPI console_handler(DWORD event) {
@@ -66,6 +80,7 @@ std::filesystem::path config_path() {
     std::filesystem::create_directories(directory); return directory/L"settings.ini";
 }
 struct Settings : CameraFocusSettings {
+    ExternalSettings extras;
     bool enabled=true, numbers=true,glass=true,dark=true;
     float healthbar_box_gap_meters=.25f;
     bool healthbar_debug_box=false,hide_visible_healthbars=false;
@@ -77,14 +92,17 @@ struct Settings : CameraFocusSettings {
     ImVec4 skeleton_visible{.2f,.62f,1.f,1.f},skeleton_hidden{.68f,.32f,1.f,1.f};
     bool vindicta_ult_override=true;
     CameraFocusSettings vindicta_ult=assassinate_controls();
+    VindictaAutoSelectSettings vindicta_auto_select;
     AutoParrySettings auto_parry{};
 };
 void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     if(menu_preview_mode)return;
     std::ofstream out(path);out<<"enabled="<<s.enabled<<"\nnumbers="<<s.numbers<<"\nglass="<<s.glass<<"\ndark="<<s.dark<<'\n';
+    write_external_settings(out,s.extras);
     write_camera_settings(out,s);
     out<<"vindicta_ult_override="<<s.vindicta_ult_override<<'\n';
     write_camera_settings(out,assassinate_controls(s.vindicta_ult),"vindicta_ult_");
+    write_auto_select_settings(out,s.vindicta_auto_select);
     write_parry_settings(out,s.auto_parry);
     out<<"transparent_frame="<<s.transparent_frame<<"\nframe_opacity="<<s.frame_opacity<<'\n';
     out<<"show_monitor_hud="<<s.show_monitor_hud<<'\n';
@@ -98,17 +116,20 @@ void save(const Settings& s,const std::filesystem::path& path=config_path()) {
     out<<"health_visuals_hold="<<s.health_visuals.hold_only<<"\nhealth_visuals_key="<<s.health_visuals.key<<'\n';
     out<<"skeleton_visible="<<s.skeleton_visible.x<<' '<<s.skeleton_visible.y<<' '<<s.skeleton_visible.z<<'\n';
     out<<"skeleton_hidden="<<s.skeleton_hidden.x<<' '<<s.skeleton_hidden.y<<' '<<s.skeleton_hidden.z<<'\n';
+    out.close();if(path==config_path()&&s.extras.auto_save)mirror_active_preset(path);
 }
 Settings load(const std::filesystem::path& path=config_path()) {
     Settings s;std::ifstream in(path);std::string line;
     bool legacy_override=true,loaded_override=false,legacy_tags_hold=false,loaded_visuals_hold=false;float legacy_speed{};
-    std::vector<std::pair<std::string,std::string>> ult_values;
+    std::vector<std::pair<std::string,std::string>> ult_values,auto_select_values;
     FocusAreaMigration area_migration,ult_area_migration;
     while(std::getline(in,line)) {
         auto at=line.find('=');if(at==std::string::npos) continue;
         auto key=line.substr(0,at),value=line.substr(at+1);std::istringstream data(value);
         if(key=="vindicta_ult_override") {int n{};if(data>>n){s.vindicta_ult_override=n!=0;loaded_override=true;}continue;}
         if(key.starts_with("vindicta_ult_")){ult_values.emplace_back(key.substr(13),value);continue;}
+        if(key.starts_with("vindicta_auto_select_")){auto_select_values.emplace_back(key,value);continue;}
+        if(read_external_setting(s.extras,key,data))continue;
         if(area_migration.read(key,data))continue;
         if(read_camera_setting(s,key,data))continue;
         if(read_parry_setting(s.auto_parry,key,data))continue;
@@ -143,7 +164,7 @@ Settings load(const std::filesystem::path& path=config_path()) {
     s.frame_opacity=std::clamp(s.frame_opacity,.4f,.9f);
     s.healthbar_box_gap_meters=std::clamp(s.healthbar_box_gap_meters,0.f,2.f);
     if(!loaded_visuals_hold)s.health_visuals.hold_only=legacy_tags_hold;
-    sanitize_health_visuals(s.health_visuals);
+    sanitize_health_visuals(s.health_visuals);sanitize_external(s.extras);
     area_migration.apply(s);sanitize_camera_settings(s);
     sanitize_parry_settings(s.auto_parry);
     // Seed old installations from their current controls, then apply independent saved values.
@@ -157,7 +178,15 @@ Settings load(const std::filesystem::path& path=config_path()) {
     ult_area_migration.apply(s.vindicta_ult);sanitize_camera_settings(s.vindicta_ult);
     restrict_assassinate_targets(s.vindicta_ult);
     s.vindicta_ult.prediction=false; // Assassinate is hitscan, regardless of primary weapon settings.
+    s.vindicta_auto_select.speed=s.vindicta_ult.focus_speed;
+    for(const auto& [key,value]:auto_select_values){std::istringstream data(value);read_auto_select_setting(s.vindicta_auto_select,key,data);}
+    sanitize_auto_select(s.vindicta_auto_select);
     return s;
+}
+Settings load_startup_settings() {
+    auto path=config_path();auto name=active_preset(path.parent_path());auto preset=preset_path(path.parent_path(),name);
+    if(!preset.empty()&&valid_preset_file(preset)){auto settings=load(preset);disable_preset_automation(settings);return settings;}
+    return load(path);
 }
 std::string escaped(const std::string& input) {
     std::string result;for(char c:input) {if(c=='"'||c=='\\')result+='\\';if(c=='\n'){result+="\\n";continue;}if(static_cast<unsigned char>(c)>=32)result+=c;}return result;
@@ -607,8 +636,10 @@ struct Surface {
     solace::platform::d3d11_renderer renderer;
     double submit_ms{},present_ms{};
     bool last_presented{};uint64_t busy_presents{};
-    bool overlay{}, resized{},dragging{},panel_shader{},glass_shader{};UINT width{},height{};POINT drag_origin{},drag_window{};
+    bool overlay{},preview{}, resized{},dragging{},panel_shader{},glass_shader{};UINT width{},height{};POINT drag_origin{},drag_window{};
     void shutdown() {
+        if(context)ImGui::SetCurrentContext(context);
+        if(preview&&context){solace::glass::cursor_shutdown();solace::snapshot::shutdown();}
         if(!overlay&&context){solace::icons::shutdown_textures();solace::glass::cursor_shutdown();solace::rounded_panel::shutdown();solace::snapshot::shutdown();solace::fonts.reset();solace::ui_runtime::clear_animation_states();}
         if(context) {ImGui::SetCurrentContext(context);ImGui_ImplDX11_Shutdown();ImGui_ImplWin32_Shutdown();ImGui::DestroyContext(context);context=nullptr;}
         if(hwnd){DestroyWindow(hwnd);hwnd=nullptr;}
@@ -625,14 +656,21 @@ struct Application {
     ReplayCamera camera;
     AdaptiveFocus adaptive;
     X2TargetLock target_lock;
+    ExtendedCamera extended_camera;
     target_zone::ZoneOutlineCache zone_outline;
     RayClick ray_click;
     AutoParry auto_parry;
-    Surface settings_window,bar_window;
-    Settings settings=load();
+    VindictaAutoSelect auto_select;
+    GameIcons game_icons;
+    ModelPreview preview_model;GameIcons preview_icons;
+    Surface settings_window,bar_window,preview_window;
+    ImRect preview_occluded_control,preview_health_control;
+    double next_preview_frame{};
+    Settings settings=load_startup_settings();
     HealthKeyCapture health_key_capture;
     CameraFocusSettings scoped_controls;
-    bool quit{},show_settings{},diagnostics{},ult_scope_active{},ult_profile_active{},click_ultimate{};
+    bool quit{},show_settings{},diagnostics{},ult_scope_active{},ult_profile_active{};
+    int vindicta_section{};
     solace::shell_page menu_page{solace::shell_page::camera};
     int page{-1},bars{},hidden_tags{};float page_time{1.f};
     HWND game_hwnd{};
@@ -641,10 +679,14 @@ struct Application {
     std::atomic_bool sampling{true};
     std::atomic<double> sample_hz{60};
     std::atomic<unsigned> read_options{};
+    void cancel_automation(const char* reason="Controls changed") {
+        extended_camera.cancel();auto_select.stop(makcu,reason);makcu.cancel();camera.release();adaptive.release();target_lock.invalidate(reason);
+        ray_click.release(makcu,reason);auto_parry.cancel(makcu,reason);
+    }
     void sync_input_backend() {
         const auto generation=makcu.backend_generation();
         if(generation==input_backend_generation)return;
-        makcu.cancel();camera.release();adaptive.release();
+        extended_camera.cancel();auto_select.stop(makcu,"Input backend changed");makcu.cancel();camera.release();adaptive.release();
         target_lock.invalidate("Input backend changed / release X2");
         ray_click.release(makcu,"Input backend changed");auto_parry.cancel(makcu,"Input backend changed");
         input_backend_generation=generation;
@@ -654,7 +696,9 @@ struct Application {
         const bool use_ult=scoped&&settings.vindicta_ult_override;
         if(scoped!=ult_scope_active||use_ult!=ult_profile_active) {
             // Drop selection and queued corrections before changing profiles or shot type.
-            camera.release();adaptive.release();makcu.cancel();ray_click.release(makcu);
+            camera.release();adaptive.release();
+            if(auto_select.active()){makcu.cancel_motion();auto_select.reset_response();ray_click.hit={};}
+            else {makcu.cancel();ray_click.release(makcu);}
             ult_scope_active=scoped;ult_profile_active=use_ult;
         }
         const auto& profile=use_ult?settings.vindicta_ult:static_cast<const CameraFocusSettings&>(settings);
@@ -662,6 +706,7 @@ struct Application {
         return profile;
     }
     void open_settings() {
+        extended_camera.cancel();auto_select.stop(makcu,"Menu open");
         makcu.cancel();ray_click.release(makcu,"Paused / menu open");
         target_lock.invalidate("Menu open / release X2");
         show_settings=true;
@@ -679,11 +724,12 @@ struct Application {
         if(GetForegroundWindow()==settings_window.hwnd){ClipCursor(nullptr);SetCapture(settings_window.hwnd);}
     }
     void hide_settings() {
-        bool owned_focus=GetForegroundWindow()==settings_window.hwnd;
+        bool owned_focus=GetForegroundWindow()==settings_window.hwnd||GetForegroundWindow()==preview_window.hwnd;
         show_settings=false;health_key_capture.cancel();save(settings);
-        if(GetCapture()==settings_window.hwnd)ReleaseCapture();
+        if(GetCapture()==settings_window.hwnd||GetCapture()==preview_window.hwnd)ReleaseCapture();
         settings_window.dragging=false;
         ShowWindow(settings_window.hwnd,SW_HIDE);
+        if(preview_window.hwnd)ShowWindow(preview_window.hwnd,SW_HIDE);
         if(owned_focus&&IsWindow(game_hwnd)&&!IsIconic(game_hwnd))SetForegroundWindow(game_hwnd);
     }
 };
@@ -709,7 +755,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
         if(message==WM_LBUTTONUP && s->dragging){s->dragging=false;return 0;}
         if(message==WM_CAPTURECHANGED)s->dragging=false;
     }
-    if(!s->overlay && s->context) {
+    if((!s->overlay||s->preview) && s->context) {
         auto previous=ImGui::GetCurrentContext();ImGui::SetCurrentContext(s->context);
         auto handled=ImGui_ImplWin32_WndProcHandler(hwnd,message,w,l);ImGui::SetCurrentContext(previous);
         if((message==WM_LBUTTONUP||message==WM_RBUTTONUP||message==WM_MBUTTONUP)
@@ -719,17 +765,21 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     switch(message) {
     case WM_SIZE: if(w!=SIZE_MINIMIZED){s->width=LOWORD(l);s->height=HIWORD(l);s->resized=true;} return 0;
     case WM_DPICHANGED: if(!s->overlay) {auto r=reinterpret_cast<RECT*>(l);SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);} return 0;
-    case WM_CLOSE: if(!s->overlay)s->app->hide_settings();return 0;
+    case WM_CLOSE: if(!s->overlay||s->preview)s->app->hide_settings();return 0;
     case WM_KILLFOCUS:if(!s->overlay&&s->app->health_key_capture.active())s->app->health_key_capture.request_cancel();break;
-    case WM_KEYDOWN:if(!s->overlay&&w==VK_ESCAPE){
+    case WM_KEYDOWN:if((!s->overlay||s->preview)&&w==VK_ESCAPE){
         if(s->app->health_key_capture.active())s->app->health_key_capture.request_cancel();
         else s->app->hide_settings();return 0;
     }break;
     case WM_SETCURSOR:
-        if(!s->overlay&&LOWORD(l)==HTCLIENT&&solace::glass::enabled()&&solace::glass::cursor_live()) {SetCursor(nullptr);return TRUE;}
+        if((!s->overlay||s->preview)&&s->context&&LOWORD(l)==HTCLIENT&&solace::glass::enabled()) {
+            auto previous=ImGui::GetCurrentContext();ImGui::SetCurrentContext(s->context);
+            const bool live=solace::glass::cursor_live();ImGui::SetCurrentContext(previous);
+            if(live){SetCursor(nullptr);return TRUE;}
+        }
         break;
-    case WM_MOUSEACTIVATE:return s->overlay?MA_NOACTIVATE:MA_ACTIVATE;
-    case WM_NCHITTEST:if(s->overlay)return HTTRANSPARENT;break;
+    case WM_MOUSEACTIVATE:return s->overlay&&!s->preview?MA_NOACTIVATE:MA_ACTIVATE;
+    case WM_NCHITTEST:if(s->overlay&&!s->preview)return HTTRANSPARENT;break;
     case WM_SYSCOMMAND:if((w&0xfff0)==SC_KEYMENU)return 0;break;
     case WM_DESTROY:return 0;
     }
@@ -746,11 +796,12 @@ bool create_surface(Application& app,Surface& s,bool overlay) {
         overlay?0:(GetSystemMetrics(SM_CXSCREEN)-width)/2,overlay?0:(GetSystemMetrics(SM_CYSCREEN)-height)/2,
         overlay?1:width,overlay?1:height,nullptr,nullptr,wc.hInstance,&s);
     if(!s.hwnd)return false;
+    if(s.preview){SetWindowTextW(s.hwnd,L"Vanta visual preview");SetWindowLongPtrW(s.hwnd,GWL_EXSTYLE,ex&~(WS_EX_TRANSPARENT|WS_EX_NOACTIVATE));SetWindowLongPtrW(s.hwnd,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(app.settings_window.hwnd));}
     SetLayeredWindowAttributes(s.hwnd,0,255,LWA_ALPHA);MARGINS margins{-1};if(FAILED(DwmExtendFrameIntoClientArea(s.hwnd,&margins)))return false;
     if(!s.renderer.initialize(s.hwnd,prefer_composition))return false;
     s.context=ImGui::CreateContext();ImGui::SetCurrentContext(s.context);
     auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard|ImGuiConfigFlags_NoMouseCursorChange;
-    if(overlay)io.ConfigFlags|=ImGuiConfigFlags_NoMouse|ImGuiConfigFlags_NoMouseCursorChange;
+    if(overlay&&!s.preview)io.ConfigFlags|=ImGuiConfigFlags_NoMouse;
     if(!ImGui_ImplWin32_Init(s.hwnd)||!ImGui_ImplDX11_Init(s.renderer.device(),s.renderer.context()))return false;
     ImGui::StyleColorsDark();
     if(overlay) {ImFontConfig config;config.FontDataOwnedByAtlas=false;io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(solace::geist_semibold.data()),static_cast<int>(solace::geist_semibold.size()),15.f,&config);}
@@ -764,17 +815,19 @@ bool create_surface(Application& app,Surface& s,bool overlay) {
         s.glass_shader=solace::glass::cursor_init(s.renderer.device(),s.renderer.context());
         solace::glass::enabled()=app.settings.glass;
     }
+    if(s.preview)s.glass_shader=solace::glass::cursor_init(s.renderer.device(),s.renderer.context());
     return true;
 }
 bool begin_frame(Surface& s) {
     ImGui::SetCurrentContext(s.context);
     if(!s.overlay) {
         float scale=float(GetDpiForWindow(s.hwnd))/96;
+        RECT client{};if(GetClientRect(s.hwnd,&client)&&client.right>0)scale=std::min(scale,float(client.right)/1168.f);
         if(std::abs(scale-solace::ui_runtime::scale)>0.001f)solace::ui_runtime::set_scale(scale,true);
         solace::fonts.update();
     }
-    if(s.resized && s.width && s.height) {s.resized=false;if(!s.overlay)solace::snapshot::invalidate_backdrop();if(!s.renderer.resize(s.width,s.height))return false;}
-    if(!s.overlay)solace::snapshot::attach(s.renderer.device(),s.renderer.context(),s.renderer.swap_chain());
+    if(s.resized && s.width && s.height) {s.resized=false;if(!s.overlay||s.preview)solace::snapshot::invalidate_backdrop();if(!s.renderer.resize(s.width,s.height))return false;}
+    if(!s.overlay||s.preview)solace::snapshot::attach(s.renderer.device(),s.renderer.context(),s.renderer.swap_chain());
     ImGui_ImplDX11_NewFrame();ImGui_ImplWin32_NewFrame();ImGui::NewFrame();return true;
 }
 void render_frame(Surface& s) {
@@ -842,17 +895,25 @@ bool enemy_visual_visibility_allows(const Snapshot& snapshot,const Player& playe
     // Treat an exposed hitbox as visible even if all three anchor points are blocked.
     return std::none_of(player.hitboxes.begin(),player.hitboxes.end(),[](const auto& box){return box.visibility_known&&box.visible;});
 }
-bool hidden_enemy_tag_eligible(const Snapshot& snapshot,const Player& player,bool hide_when_visible=true) {
-    return enemy_teams(snapshot.local_team,player.team)&&player.health>0&&player.feet_valid&&!player.hero_name.empty()
+bool hidden_enemy_tag_eligible(const Snapshot& snapshot,const Player& player,bool hide_when_visible=true,bool teammates=false) {
+    return (teammates||enemy_teams(snapshot.local_team,player.team))&&player.health>0&&player.feet_valid&&!player.hero_name.empty()
         &&enemy_visual_visibility_allows(snapshot,player,hide_when_visible);
 }
-bool draw_hidden_enemy_tag(ImDrawList* draw,const Snapshot& snapshot,const Player& player,float width,float height,const Settings& settings,float scale) {
-    if(!hidden_enemy_tag_eligible(snapshot,player,settings.hide_visible_enemy_tags)||width<80*scale||height<40*scale)return false;
+bool draw_hidden_enemy_tag(ImDrawList* draw,const Snapshot& snapshot,const Player& player,float width,float height,const Settings& settings,float scale,GameIcons& icons) {
+    if(!enemy_teams(snapshot.local_team,player.team)||player.health<=0||!player.feet_valid||!enemy_visual_visibility_allows(snapshot,player,settings.hide_visible_enemy_tags)||width<80*scale||height<40*scale)return false;
     ScreenPoint feet;
     if(!project(snapshot.matrix,player.feet,width,height,feet))return false;
     auto font=ImGui::GetFont();const float size=13*scale,padding=10*scale;
-    const auto text_size=font->CalcTextSizeA(size,FLT_MAX,0,player.hero_name.c_str());
-    const float tag_width=std::min(text_size.x+padding*2,width-8*scale),tag_height=text_size.y+10*scale;
+    const auto image=settings.hidden_enemy_tags&&settings.extras.hero_icons?icons.hero(player.hero_id):nullptr;
+    std::string name=settings.hidden_enemy_tags&&!image?player.hero_name:std::string{},distance;
+    if(settings.extras.player_distance&&(snapshot.local_player_valid||snapshot.camera_valid)) {
+        char text[32]{};std::snprintf(text,sizeof(text),"%.0f m",world_distance_meters(snapshot.local_player_valid?snapshot.local_player.origin:snapshot.camera_position,player.feet));distance=text;
+    }
+    if(name.empty()&&!image&&distance.empty())return false;
+    const auto text_size=font->CalcTextSizeA(size,FLT_MAX,0,name.c_str()),distance_size=font->CalcTextSizeA(size,FLT_MAX,0,distance.c_str());
+    const float content_height=image?settings.extras.hero_icon_size*scale:!name.empty()?text_size.y:0;
+    const float content_width=image?settings.extras.hero_icon_size*scale:text_size.x;
+    const float tag_width=std::min(std::max(content_width,distance_size.x)+padding*2,width-8*scale),tag_height=content_height+(distance.empty()?0:distance_size.y+(content_height>0?3*scale:0))+10*scale;
     const ImVec2 at{std::clamp(feet.x-tag_width*.5f,4*scale,width-4*scale-tag_width),feet.y+8*scale};
     const ImVec2 end{at.x+tag_width,at.y+tag_height};
     if(end.y>height-4*scale)return false;
@@ -863,7 +924,9 @@ bool draw_hidden_enemy_tag(ImDrawList* draw,const Snapshot& snapshot,const Playe
     draw->AddRectFilled(at,end,solace::mo::with_alpha(solace::c_background,opacity),rounding);
     draw->AddRect(at,end,solace::c_border,rounding,0,scale);
     const ImVec4 clip{at.x+padding,at.y,end.x-padding,end.y};
-    draw->AddText(font,size,at+ImVec2{padding,5*scale},solace::c_foreground,player.hero_name.c_str(),nullptr,0,&clip);
+    if(image)GameIcons::draw(draw,*image,{at.x+tag_width*.5f,at.y+5*scale+content_height*.5f},content_height);
+    else if(!name.empty())draw->AddText(font,size,{at.x+(tag_width-text_size.x)*.5f,at.y+5*scale},solace::c_foreground,name.c_str(),nullptr,0,&clip);
+    if(!distance.empty())draw->AddText(font,size,{at.x+(tag_width-distance_size.x)*.5f,at.y+5*scale+content_height+(content_height>0?3*scale:0)},solace::c_foreground,distance.c_str(),nullptr,0,&clip);
     return true;
 }
 void draw_skeleton(ImDrawList* draw,const Player& player,const Matrix& matrix,float width,float height,const Settings& settings,float scale) {
@@ -934,7 +997,15 @@ void draw_focus_area(ImDrawList* draw,const Snapshot& snapshot,const CameraFocus
         lines(outline->activation,retained?IM_COL32(255,200,70,230):IM_COL32(70,155,255,215));
         return;
     }
-    draw_angular_area(draw,snapshot,settings.adaptive.radius_degrees,width,height,IM_COL32(90,170,255,190),1.4f*scale);
+    ImVec4 guide=settings.tracking.enabled?settings.tracking.guide_color:ImVec4(.35f,.67f,1,.75f);
+    if(settings.tracking.enabled&&settings.tracking.rgb)ImGui::ColorConvertHSVtoRGB(float(std::fmod(ImGui::GetTime()*.15,1.)),.8f,1,guide.x,guide.y,guide.z);
+    if(settings.adaptive.area==AdaptiveAreaMode::PixelCircle||settings.adaptive.area==AdaptiveAreaMode::PixelSquare) {
+        auto center=focus_reference(width,height);ImVec2 c{center.x,center.y};float r=settings.adaptive.pixel_radius;
+        if(settings.adaptive.area==AdaptiveAreaMode::PixelSquare)draw->AddRect(c-ImVec2{r,r},c+ImVec2{r,r},ImGui::ColorConvertFloat4ToU32(guide));
+        else draw->AddCircle(c,r,ImGui::ColorConvertFloat4ToU32(guide),96);
+        if(selected){r*=1.3f;guide.w*=.3f;if(settings.adaptive.area==AdaptiveAreaMode::PixelSquare)draw->AddRect(c-ImVec2{r,r},c+ImVec2{r,r},ImGui::ColorConvertFloat4ToU32(guide));else draw->AddCircle(c,r,ImGui::ColorConvertFloat4ToU32(guide),96);}return;
+    }
+    draw_angular_area(draw,snapshot,settings.adaptive.radius_degrees,width,height,ImGui::ColorConvertFloat4ToU32(guide),1.4f*scale);
     if(selected)draw_angular_area(draw,snapshot,settings.adaptive.radius_degrees*1.3f,width,height,IM_COL32(90,170,255,65),scale);
     return;
 }
@@ -959,22 +1030,14 @@ int draw_focus_guide(ImDrawList* draw,const Snapshot& snapshot,const FocusTarget
     return 0;
 }
 struct PageContext { Application& app; const Snapshot& snapshot; };
-void draw_midboss_hud(ImDrawList* draw,const MidBossState& state,float scale,ImVec2 anchor={24,100}) {
-    const ImVec2 at=anchor*scale,end=at+ImVec2{248*scale,67*scale};
-    const ImU32 accent=state.phase==MidBossPhase::Alive?IM_COL32(70,220,165,255)
-        :state.phase==MidBossPhase::Countdown?(state.remaining<=30?IM_COL32(255,196,75,255):IM_COL32(90,170,255,255))
-        :IM_COL32(160,170,185,255);
-    draw->AddRectFilled(at,end,IM_COL32(15,20,28,222),10*scale);
-    draw->AddRect(at,end,IM_COL32(110,135,165,70),10*scale,0,scale);
-    draw->AddLine(at+ImVec2{1*scale,15*scale},at+ImVec2{1*scale,52*scale},accent,2*scale);
-    draw->AddText(ImGui::GetFont(),14*scale,at+ImVec2{15*scale,13*scale},IM_COL32(230,236,245,255),"MID BOSS");
+void draw_midboss_hud(ImDrawList* draw,const MidBossState& state,float scale,ImVec2 anchor={24,100},float opacity=1) {
+    const ImU32 accent=state.phase==MidBossPhase::Alive?hud_good()
+        :state.phase==MidBossPhase::Countdown&&state.remaining<=30?hud_warning():solace::c_foreground;
     const std::string value=state.phase==MidBossPhase::Countdown?midboss_countdown(state.remaining)
-        :state.phase==MidBossPhase::Alive?"ALIVE":state.phase==MidBossPhase::Due?"DUE":"--:--";
-    auto font=ImGui::GetFont();const auto size=font->CalcTextSizeA(21*scale,FLT_MAX,0,value.c_str());
-    draw->AddText(font,21*scale,{end.x-15*scale-size.x,at.y+10*scale},accent,value.c_str());
-    const char* detail=state.paused?"Paused / game clock stopped":state.phase==MidBossPhase::Countdown?"Until next spawn"
-        :state.phase==MidBossPhase::Alive?"Living boss confirmed":state.phase==MidBossPhase::Due?"Awaiting boss entity":"Spawn data unavailable";
-    draw->AddText(font,12*scale,at+ImVec2{15*scale,43*scale},IM_COL32(160,174,193,255),detail);
+        :state.phase==MidBossPhase::Alive?"Alive":state.phase==MidBossPhase::Due?"Due":"--:--";
+    const char* detail=state.paused?"Paused":state.phase==MidBossPhase::Countdown?"Next spawn"
+        :state.phase==MidBossPhase::Alive?"Available":state.phase==MidBossPhase::Due?"Spawn due":"Not available on this map";
+    draw_hud_card(draw,anchor*scale,scale,"Mid boss",value.c_str(),detail,HudGlyph::Boss,accent,opacity);
 }
 void draw_adaptive_response_info(const Snapshot& snap) {
     ImGui::TextWrapped("Screen feedback / no calibration required");
@@ -991,15 +1054,16 @@ void draw_zone_diagnostics(const AdaptiveFocus& focus) {
         ImGui::EndChild();ImGui::TreePop();
     }
 }
-void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* context) {
+void overlay_page(solace::shell_page page,const ImRect& page_body,float alpha,void* context) {
     auto& data=*static_cast<PageContext*>(context);auto& app=data.app;const auto& snap=data.snapshot;
     using namespace solace;
+    ImRect body=page_body;
     if(app.page!=int(page)){app.page=int(page);app.page_time=0;}
     app.page_time+=ImGui::GetIO().DeltaTime;
     float reveal=mo::EASE_OUT(std::clamp(app.page_time/.22f,0.f,1.f));alpha*=reveal;
     ImVec2 origin=body.Min+px(0.f,8.f*(1-reveal));auto dl=ImGui::GetWindowDrawList();
     auto text=[&](ImVec2 at,const char* label,bool muted=false,float size=16.f){draw_text(dl,font_semibold(size),at,mo::with_alpha(muted?c_muted_foreground:c_foreground,alpha),label);};
-    draw_text_tracked(dl,font_semibold(24),origin,mo::with_alpha(c_foreground,alpha),page==shell_page::camera?"Camera Focus":page==shell_page::vindicta_ult?"Vindicta Ultimate":page==shell_page::health?"Health bars":page==shell_page::test?"Diagnostics":page==shell_page::auto_click?"Auto Click":page==shell_page::auto_parry?"Auto Parry":"Connection",px(-.4f));
+    draw_text_tracked(dl,font_semibold(24),origin,mo::with_alpha(c_foreground,alpha),page==shell_page::camera?"Camera Focus":page==shell_page::vindicta_ult?"Vindicta Ultimate":page==shell_page::health?"Visuals":page==shell_page::hud?"HUDs":page==shell_page::test?"Diagnostics":page==shell_page::auto_click?"Auto Click":page==shell_page::auto_parry?"Auto Parry":page==shell_page::configurations?"Configurations":"Connection",px(-.4f));
     auto card=[&](ImRect box,const char* title,icons::id icon){
         rounded_panel::draw(dl,box.Min,box.Max,mo::with_alpha(c_card,(app.settings.transparent_frame?1.f:.72f)*alpha),px(16));
         dl->AddRect(box.Min+px(.5f,.5f),box.Max-px(.5f,.5f),mo::with_alpha(c_border,alpha),px(16),0,px(1));
@@ -1008,69 +1072,29 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
     };
     bool changed=false;
     ui_runtime::push_font(font_semibold(16));ImGui::PushStyleColor(ImGuiCol_Text,ImGui::ColorConvertU32ToFloat4(c_foreground));
+    const bool ultimate_page=page==shell_page::vindicta_ult;
+    if(ultimate_page) {
+        constexpr const char* sections[]={"Camera","Auto Click","Auto Select"};
+        tabs("Vindicta sections",origin+px(0,40),sections,3,&app.vindicta_section,tabs_underline);
+        text({body.Max.x-px(190),origin.y+px(5)},app.vindicta_section==2?"Auto Select":app.vindicta_section==1?"Ultimate profile":"Camera focus",true,14);
+        auto* enabled=app.vindicta_section==2?&app.settings.vindicta_auto_select.enabled:app.vindicta_section==1?&app.settings.vindicta_ult_override:&app.settings.vindicta_ult.replay_focus;
+        if(switch_toggle("vindicta_header_enabled",{body.Max.x-px(48),origin.y},enabled)){app.cancel_automation("Auto Select controls changed");changed=true;}
+        auto content=origin+px(0,94);ImGui::SetCursorScreenPos(content);
+        ImGui::BeginChild("Vindicta controls",{body.GetWidth(),body.Max.y-content.y},false);
+        dl=ImGui::GetWindowDrawList();origin=ImGui::GetCursorScreenPos()-px(0,42);
+        body.Min=origin;body.Max.x=origin.x+ImGui::GetContentRegionAvail().x;
+    }
     if(page==shell_page::health) {
-        text({body.Max.x-px(354),origin.y+px(6)},"Hold to display",true,14);
-        changed|=switch_toggle("health_visuals_hold",{body.Max.x-px(218),origin.y},&app.settings.health_visuals.hold_only);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Hold the bound key to show all Health bars features: bars, numbers, skeletons, hitboxes, hero tags and the debug box.");
-        const auto key_label=health_visuals_key_name(app.settings.health_visuals.key);
-        ImGui::SetCursorScreenPos({body.Max.x-px(148),origin.y-px(1)});
-        if(ImGui::Button(("Key: "+key_label).c_str(),px(148,30))){app.health_key_capture.begin();ImGui::OpenPopup("Health display key");}
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Click to bind a keyboard key or mouse button. Default: H. Escape and Insert are reserved.");
-        if(ImGui::BeginPopup("Health display key")) {
-            ImGui::TextUnformatted("Release held keys, then press a key or mouse button.");
-            ImGui::TextUnformatted("Escape cancels. Insert closes the menu.");
-            if(GetForegroundWindow()!=app.settings_window.hwnd){app.health_key_capture.cancel();ImGui::CloseCurrentPopup();}
-            else {
-                const int key=app.health_key_capture.poll();
-                if(key>0){app.settings.health_visuals.key=key;changed=true;ImGui::CloseCurrentPopup();}
-                else if(key<0)ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
+        changed|=draw_visual_page(app.settings,snap,body);
+    } else if(page==shell_page::hud) {
+        changed|=draw_hud_settings(app.settings,{origin,origin+body.GetSize()},alpha);
+    } else if(ultimate_page&&app.vindicta_section==1) {
+        changed|=draw_auto_click_settings(app.settings.vindicta_ult,true,app.ult_profile_active,app.ray_click,app.makcu,
+            {origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
+    } else if(ultimate_page&&app.vindicta_section==2) {
+        if(draw_auto_select_settings(app.settings.vindicta_auto_select,app.auto_select,snap,app.makcu,{origin,origin+body.GetSize()},alpha,app.settings.transparent_frame)) {
+            app.cancel_automation("Auto Select settings changed");changed=true;
         }
-        if(!ImGui::IsPopupOpen("Health display key"))app.health_key_capture.cancel();
-        const float gap=px(16),column=(body.GetWidth()-gap)*.5f;
-        ImRect controls(origin+px(0,60),{body.Max.x,origin.y+px(244)});
-        ImRect geometry(origin+px(0,256),origin+ImVec2(column,px(480)));
-        ImRect tags({geometry.Max.x+gap,geometry.Min.y},{body.Max.x,origin.y+px(420)});
-        card(controls,"HEALTH BARS",icons::id::eye);
-        card(geometry,"SKELETONS & HITBOXES",icons::id::sparkles);
-        card(tags,"HERO NAME TAGS",icons::id::user);
-        auto toggle=[&](const ImRect& box,float y,const char* id,const char* title,bool& value) {
-            text(box.Min+px(20,y+5),title,false,14);
-            changed|=switch_toggle(id,{box.Max.x-px(20+switch_w),box.Min.y+px(y)},&value);
-        };
-        ImRect left=controls,right=controls;left.Max.x=controls.GetCenter().x-gap*.5f;right.Min.x=controls.GetCenter().x+gap*.5f;
-        toggle(left,48,"draw_health","Health bars",app.settings.enabled);
-        toggle(left,90,"show_numbers","Health numbers",app.settings.numbers);
-        ImGui::BeginDisabled(!app.settings.enabled);
-        toggle(left,132,"hide_visible_healthbars","Hide when visible",app.settings.hide_visible_healthbars);
-        ImGui::EndDisabled();
-        char distance[32]{};snprintf(distance,sizeof(distance),"%.2f m",app.settings.healthbar_box_gap_meters);
-        text(right.Min+px(20,50),"Box gap",true,14);
-        text({right.Max.x-px(20)-text_width(font_semibold(14),distance),right.Min.y+px(50)},distance,false,14);
-        changed|=range_slider("healthbar_box_gap_meters",right.Min+px(20,70),right.GetWidth()-px(40),&app.settings.healthbar_box_gap_meters,0,2);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("World distance from the body box's left edge to the bar. The gap projects through the current camera view.");
-        toggle(right,132,"healthbar_debug_box","Debug placement box",app.settings.healthbar_debug_box);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Draw the exact projected bone box used to place the health bar. Works with health bars disabled.");
-        toggle(geometry,46,"skeletons","Skeletons",app.settings.skeletons);
-        ImGui::BeginDisabled(!app.settings.skeletons);
-        toggle(geometry,82,"hide_visible_skeletons","Hide visible skeletons",app.settings.hide_visible_skeletons);
-        ImGui::EndDisabled();
-        toggle(geometry,118,"hitboxes","Hitboxes",app.settings.hitboxes);
-        ImGui::SetCursorScreenPos(geometry.Min+px(20,168));
-        constexpr auto color_flags=ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel;
-        changed|=ImGui::ColorEdit3("##skeleton_visible",&app.settings.skeleton_visible.x,color_flags);
-        ImGui::SameLine();ImGui::TextUnformatted("Visible");ImGui::SameLine();
-        changed|=ImGui::ColorEdit3("##skeleton_hidden",&app.settings.skeleton_hidden.x,color_flags);
-        ImGui::SameLine();ImGui::TextUnformatted("Blocked");
-        toggle(tags,48,"hidden_enemy_tags","Hero name tags",app.settings.hidden_enemy_tags);
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Hero names below enemies. Uses Appearance transparency and opacity.");
-        ImGui::BeginDisabled(!app.settings.hidden_enemy_tags);
-        toggle(tags,90,"hide_visible_enemy_tags","Hide when visible",app.settings.hide_visible_enemy_tags);
-        ImGui::EndDisabled();
-        ImGui::SetCursorScreenPos(origin+px(0,522));
-        if(ImGui::SmallButton("Reset all settings")){app.settings=Settings{};set_dark(true);changed=true;}
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Reset every tab, including camera profiles and automation.");
     } else if(page==shell_page::camera||page==shell_page::vindicta_ult) {
         const bool ultimate=page==shell_page::vindicta_ult;
         auto& focus=ultimate?app.settings.vindicta_ult:static_cast<CameraFocusSettings&>(app.settings);
@@ -1080,8 +1104,10 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         const bool ult_active=scoped&&app.settings.vindicta_ult_override;
         ImGui::PushID(ultimate?"vindicta_ult":"regular_focus");
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,px(10,6));
-        text({body.Max.x-px(190),origin.y+px(5)},"Camera focus",true,14);
-        changed|=switch_toggle("replay_focus",{body.Max.x-px(48),origin.y},&focus.replay_focus);
+        if(!ultimate) {
+            text({body.Max.x-px(190),origin.y+px(5)},"Camera focus",true,14);
+            changed|=switch_toggle("replay_focus",{body.Max.x-px(48),origin.y},&focus.replay_focus);
+        }
         const char* input_label=app.makcu.label();
         badge("input_ready",dl,origin+px(0,43),input_label,app.makcu.ready()?badge_good:badge_warn,false,alpha);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",app.makcu.status().c_str());
@@ -1092,34 +1118,37 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         text({origin.x+badge_width(input_label)+px(16),origin.y+px(46)},hero_label,true,14);
         dl->PopClipRect();
         ImGui::SetCursorScreenPos({body.Max.x-px(148),origin.y+px(37)});
-        if(ImGui::Button(ultimate?"Profile options":"Hero / abilities",px(148,30)))ImGui::OpenPopup("Hero ability settings");
+        if(extra_action(ultimate?"Profile options":"Tracking",px(148),false,px(30)))ImGui::OpenPopup("Hero ability settings");
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Targeting, input bindings and hero controls");
+        if(menu_preview_mode&&menu_preview_popup==1){ImGui::OpenPopup("Hero ability settings");ImGui::SetNextWindowPos(body.Min+px(100,25));}
         ImGui::SetNextWindowSizeConstraints(px(370,0),px(440,FLT_MAX));
         if(ImGui::BeginPopup("Hero ability settings")) {
             ImGui::Text("Detected hero: %s",snap.hero.name.empty()?"Waiting for hero":snap.hero.name.c_str());
             if(snap.hero.valid)ImGui::Text("Hero ID: %d",snap.hero.id);
             ImGui::TextWrapped("%s",snap.hero.ability_status.c_str());ImGui::Separator();
             if(ultimate) {
-                changed|=ImGui::Checkbox("Use separate ultimate profile",&app.settings.vindicta_ult_override);
+                changed|=extra_toggle("Use separate ultimate profile",app.settings.vindicta_ult_override);
                 ImGui::TextWrapped("Applies while Vindicta is scoped with Assassinate. Assassinate always targets enemy players only.");
-                if(ImGui::Button("Copy regular controls")){focus=assassinate_controls(static_cast<const CameraFocusSettings&>(app.settings));focus.prediction=false;changed=true;}
-                if(ImGui::Button("Reset ultimate controls")){focus=assassinate_controls();changed=true;}
+                if(extra_action("Copy regular controls")){focus=assassinate_controls(static_cast<const CameraFocusSettings&>(app.settings));focus.prediction=false;changed=true;}
+                if(extra_action("Reset ultimate controls")){focus=assassinate_controls();changed=true;}
             }else {
-                changed|=ImGui::Checkbox("Sandbox & bots",&focus.debug_focus);
-                if(ImGui::Button("Open Vindicta Ultimate")){app.menu_page=shell_page::vindicta_ult;ImGui::CloseCurrentPopup();}
+                changed|=extra_toggle("Sandbox & bots",focus.debug_focus);
+                if(extra_action("Open Vindicta Ultimate")){app.menu_page=shell_page::vindicta_ult;ImGui::CloseCurrentPopup();}
             }
-            if(ImGui::Button("Open Auto Click")){app.click_ultimate=ultimate;app.menu_page=shell_page::auto_click;ImGui::CloseCurrentPopup();}
+            if(extra_action("Open Auto Click")){if(ultimate)app.vindicta_section=1;else app.menu_page=shell_page::auto_click;ImGui::CloseCurrentPopup();}
             ImGui::Separator();
             if(snap.projection.valid) {
                 ImGui::Text("Live view: %.1f x %.1f degrees",snap.projection.horizontal_fov,snap.projection.vertical_fov);
                 ImGui::Text("Render aspect ratio: %.3f",snap.projection.aspect);
             }else ImGui::TextUnformatted("Waiting for the game's render view");
+            changed|=draw_tracking_controls(focus,ultimate);
             ImGui::EndPopup();
         }
         const float gap=px(16),left=(body.GetWidth()-gap)*.53f;
-        ImRect movement(origin+px(0,80),origin+ImVec2(left,px(ultimate?510.f:354.f)));
+        ImRect movement(origin+px(0,80),origin+ImVec2(left,px(ultimate?458.f:354.f)));
         ImRect prediction({movement.Min.x,origin.y+px(366)},{movement.Max.x,origin.y+px(510)});
-        ImRect targets({movement.Max.x+gap,movement.Min.y},{body.Max.x,origin.y+px(262)});
-        ImRect area({targets.Min.x,origin.y+px(274)},{targets.Max.x,origin.y+px(510)});
+        ImRect targets({movement.Max.x+gap,movement.Min.y},{body.Max.x,origin.y+px(ultimate?232.f:262.f)});
+        ImRect area({targets.Min.x,origin.y+px(ultimate?244.f:274.f)},{targets.Max.x,origin.y+px(ultimate?458.f:510.f)});
         card(movement,"MOVEMENT",icons::id::crosshair_simple);
         if(!ultimate)card(prediction,"PREDICTION",icons::id::sparkles);
         card(targets,"TARGETS",icons::id::user);
@@ -1127,8 +1156,7 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         auto row_combo=[&](const ImRect& box,float y,const char* label,const char* id,int& value,const char* const* options,int count) {
             text(box.Min+px(20,y+6),label,true,14);
             const float width=std::min(px(230),box.GetWidth()*.60f);
-            ImGui::SetCursorScreenPos({box.Max.x-px(20)-width,box.Min.y+px(y)});ImGui::SetNextItemWidth(width);
-            return ImGui::Combo(id,&value,options,count);
+            return extra_select_at(id,{box.Max.x-px(20)-width,box.Min.y+px(y)},width,value,options,count);
         };
         auto row_toggle=[&](const ImRect& box,float y,const char* label,const char* id,bool& value) {
             text(box.Min+px(20,y+5),label,false,14);
@@ -1153,7 +1181,12 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         if(ImGui::IsItemHovered())ImGui::SetTooltip("V1: free along head, body and pelvis.\nAdaptive: permitted regions, screen feedback and automatic prediction.");
         adaptive=adaptive_mode(focus);
         constexpr const char* bones[]={"Head","Body","Pelvis"};
-        changed|=row_combo(movement,126,adaptive?"Preferred bone":"Target bone","##focus_bone",focus.focus_bone,bones,3);
+        if(focus.tracking.enabled&&(focus.tracking.joint>=0||focus.tracking.strategy)) {
+            text(movement.Min+px(20,131),adaptive?"Preferred joint":"Target joint",false,14);
+            const char* selected=focus.tracking.strategy==1?"Closest available":focus.tracking.strategy==2?"Random pool":joint_labels[std::clamp(focus.tracking.joint,0,15)];
+            ImGui::SetCursorScreenPos({movement.Max.x-px(210),movement.Min.y+px(126)});
+            if(extra_action(selected,px(190),false,px(30)))ImGui::OpenPopup("Hero ability settings");
+        }else changed|=row_combo(movement,126,adaptive?"Preferred bone":"Target bone","##focus_bone",focus.focus_bone,bones,3);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",adaptive?"Breaks near-ties only. Movement stays free inside every permitted hitbox.":"Choose the target bone. Free movement returns to the nearest permitted point.");
         if(adaptive) {
             constexpr const char* regions[]={"Head and torso","Whole body"};int region=int(selectable_adaptive_region(int(focus.adaptive.region)));
@@ -1179,48 +1212,44 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         }
         if(ultimate) {
             text(targets.Min+px(20,53),"Enemy players only",false,14);
-            text(targets.Min+px(20,89),"Target types and team filter are fixed",true,12);
         }else {
         ui_runtime::push_font(font_semibold(14));
         const float target_column=(targets.GetWidth()-px(40))/3;
         auto target_type=[&](int column,const char* label,bool& enabled) {
             ImGui::SetCursorScreenPos(targets.Min+ImVec2(px(20)+target_column*float(column),px(51)));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,enabled?0.f:px(1));
-            ImGui::PushStyleColor(ImGuiCol_Button,enabled?ImGui::GetStyleColorVec4(ImGuiCol_Button):ImGui::ColorConvertU32ToFloat4(c_background));
-            ImGui::PushStyleColor(ImGuiCol_Border,ImGui::ColorConvertU32ToFloat4(c_border_strong));
-            ImGui::PushStyleColor(ImGuiCol_Text,ImGui::ColorConvertU32ToFloat4(enabled?c_foreground:c_muted_foreground));
-            if(ImGui::Button(label,{target_column-px(column==2?0.f:8.f),px(30)})){enabled=!enabled;changed=true;}
-            ImGui::PopStyleColor(3);ImGui::PopStyleVar();
+            changed|=extra_checkbox(label,enabled);
         };
         target_type(0,"Players",focus.focus_players);target_type(1,"Minions",focus.focus_minions);target_type(2,"Soul orbs",focus.focus_orbs);
         ui_runtime::pop_font();
         changed|=row_toggle(targets,91,"Enemies only","exclude_teammates",focus.exclude_teammates);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Filters this Camera Focus profile only.");
         }
-        changed|=row_toggle(targets,127,"Visible only","visible_only",focus.visible_only);
+        changed|=row_toggle(targets,ultimate?91.f:127.f,"Visible only","visible_only",focus.visible_only);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",ultimate?"Only select visible points while the Assassinate profile is active.":"Only select visible focus points for this Camera Focus profile.");
         int minions=0,orbs=0;for(const auto& target:snap.focus_targets)if(target.kind==TargetKind::Minion)++minions;else if(target.kind==TargetKind::SoulOrb)++orbs;
         char available[96]{};if(ultimate) {
             const auto enemies=std::count_if(snap.players.begin(),snap.players.end(),[&](const auto& p){return enemy_teams(snap.local_team,p.team);});
             snprintf(available,sizeof(available),"%zu enemy players",size_t(enemies));
         }else snprintf(available,sizeof(available),"%zu players / %d minions / %d orbs",snap.players.size(),minions,orbs);
-        text(targets.Min+px(20,163),available,true,12);
-        constexpr const char* areas[]={"Crosshair angle","Target Zone"};int shape=int(focus.adaptive.area);
-        if(row_combo(area,50,"Area","##focus_area",shape,areas,2)){focus.adaptive.area=static_cast<AdaptiveAreaMode>(shape);changed=true;}
+        text(targets.Min+px(20,ultimate?127.f:163.f),available,true,12);
+        constexpr const char* areas[]={"Crosshair angle","Target Zone","Pixel circle","Pixel square"};int shape=int(focus.adaptive.area);
+        if(row_combo(area,50,"Area","##focus_area",shape,areas,4)){focus.adaptive.area=static_cast<AdaptiveAreaMode>(shape);changed=true;}
         const bool zone=focus.adaptive.area==AdaptiveAreaMode::TargetZone;
         if(zone)changed|=slider(area,96,"Padding","focus_padding",focus.adaptive.padding_percent,0,100,"%.0f%% height");
+        else if(shape>=2)changed|=slider(area,96,"Radius","pixel_radius",focus.adaptive.pixel_radius,20,400,"%.0f px");
         else changed|=slider(area,96,"Radius","focus_radius_degrees",focus.adaptive.radius_degrees,1,25,"%.1f deg");
         char retention[80]{};
         if(zone)snprintf(retention,sizeof(retention),"Retention padding: %.1f%% height",focus.adaptive.padding_percent*1.3f);
         else snprintf(retention,sizeof(retention),"Retention: %.1f deg",focus.adaptive.radius_degrees*1.3f);
-        text(area.Min+px(20,163),retention,true,12);
+        text(area.Min+px(20,ultimate?148.f:163.f),retention,true,12);
         const float area_column=(area.GetWidth()-px(40))/2;
         const bool zone_area=focus.adaptive.area==AdaptiveAreaMode::TargetZone;
-        text(area.Min+px(20,202),zone_area?"Show zone":"Show FOV",true,14);
-        changed|=switch_toggle("show_focus_area",area.Min+ImVec2(px(20)+area_column-px(switch_w+12),px(196)),zone_area?&focus.adaptive.show_target_zone:&focus.adaptive.show_area);
+        const float area_toggle_y=ultimate?174.f:196.f;
+        text(area.Min+px(20,area_toggle_y+6),zone_area?"Show zone":"Show FOV",true,14);
+        changed|=switch_toggle("show_focus_area",area.Min+ImVec2(px(20)+area_column-px(switch_w+12),px(area_toggle_y)),zone_area?&focus.adaptive.show_target_zone:&focus.adaptive.show_area);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",zone_area?"Preview the nearest eligible target. Gold marks the retained target; the faint outline is its retention zone.\nPadding controls activation. Free movement still uses the original hitboxes.":"Draw the focus area. Each area mode remembers its drawing setting.");
-        text(area.Min+ImVec2(px(20)+area_column,px(202)),"Focus visuals",true,14);
-        changed|=switch_toggle("focus_visuals",{area.Max.x-px(20+switch_w),area.Min.y+px(196)},&focus.focus_visuals);
+        text(area.Min+ImVec2(px(20)+area_column,px(area_toggle_y+6)),"Focus visuals",true,14);
+        changed|=switch_toggle("focus_visuals",{area.Max.x-px(20+switch_w),area.Min.y+px(area_toggle_y)},&focus.focus_visuals);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Focus visuals: draw the selected point and free-movement geometry.");
         if(!ultimate) {
             changed|=row_toggle(prediction,49,"Prediction",adaptive?"adaptive_prediction":"prediction",adaptive?focus.adaptive.prediction:focus.prediction);
@@ -1233,12 +1262,12 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             text(prediction.Min+px(20,84),prediction_summary,true,12);dl->PopClipRect();
             ImGui::SetCursorScreenPos(prediction.Min+px(20,105));
             if(adaptive) {
-                if(ImGui::Button("Advanced",px(105,30)))ImGui::OpenPopup("Adaptive advanced");
-            }else if(ImGui::Button("Prediction settings",px(180,30)))ImGui::OpenPopup("Prediction settings");
+                if(extra_action("Advanced",px(105),false,px(30)))ImGui::OpenPopup("Adaptive advanced");
+            }else if(extra_action("Prediction settings",px(180),false,px(30)))ImGui::OpenPopup("Prediction settings");
             ImGui::SetNextWindowSizeConstraints(px(390,0),px(460,FLT_MAX));
             if(ImGui::BeginPopup("Prediction settings")) {
-                changed|=ImGui::Checkbox("Prediction",&focus.prediction);
-                changed|=ImGui::Checkbox("Auto weapon speed",&focus.auto_speed);
+                changed|=extra_toggle("Prediction",focus.prediction);
+                changed|=extra_toggle("Auto weapon speed",focus.auto_speed);
                 if(focus.auto_speed) {
                     if(snap.weapon.valid) {
                         ImGui::Text("Live bullet speed: %.0f units/s",snap.weapon.speed);
@@ -1246,9 +1275,8 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
                         ImGui::Text("Movement inheritance: %.2f",snap.weapon.inheritance);
                     }else ImGui::TextWrapped("%s",snap.weapon.status.c_str());
                 }else {
-                    ImGui::SetNextItemWidth(px(340));
-                    changed|=ImGui::SliderFloat("##projectile_speed",&focus.projectile_speed,1000.f,100000.f,"Bullet speed: %.0f units/s");
-                    changed|=ImGui::Checkbox("Inherit shooter velocity",&focus.inherit_velocity);
+                    changed|=extra_slider("Bullet speed (units/s)",&focus.projectile_speed,1000.f,100000.f,"%.0f");
+                    changed|=extra_toggle("Inherit shooter velocity",focus.inherit_velocity);
                 }
                 ImGui::EndPopup();
             }
@@ -1256,17 +1284,17 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             text(movement.Min+px(20,294),"Hitscan / no projectile travel lead",true,12);
             text(movement.Min+px(20,318),"Sample-age compensation is automatic",true,12);
             if(adaptive) {
-                ImGui::SetCursorScreenPos(movement.Min+px(20,352));
-                if(ImGui::Button("Advanced response",px(180,30)))ImGui::OpenPopup("Adaptive advanced");
+                ImGui::SetCursorScreenPos(movement.Min+px(20,334));
+                if(extra_action("Advanced response",px(180),false,px(30)))ImGui::OpenPopup("Adaptive advanced");
             }
         }
         ImGui::SetNextWindowSizeConstraints(px(390,0),{px(460),ImGui::GetIO().DisplaySize.y-px(48)});
         if(ImGui::BeginPopup("Adaptive advanced")) {
             draw_adaptive_response_info(snap);
             ImGui::Text("X1 response: %.1f ms / X2: %.1f ms",adaptive_response_ms(focus.adaptive.speed),adaptive_response_ms(focus.adaptive_speed_x2));
-            ImGui::Separator();ImGui::SetNextItemWidth(px(340));
-            changed|=ImGui::SliderFloat("##adaptive_max_rate",&focus.adaptive.max_rate,30.f,720.f,"Requested step rate: %.0f deg/s");
-            ImGui::SetNextItemWidth(px(340));changed|=ImGui::SliderFloat("##adaptive_max_acceleration",&focus.adaptive.max_acceleration,300.f,6000.f,"Acceleration: %.0f deg/s2");
+            ImGui::Separator();
+            changed|=extra_slider("Requested step rate (deg/s)",&focus.adaptive.max_rate,30.f,720.f,"%.0f");
+            changed|=extra_slider("Acceleration (deg/s2)",&focus.adaptive.max_acceleration,300.f,6000.f,"%.0f");
             if(ultimate==app.ult_profile_active) {
                 const auto& solution=app.adaptive.solution;ImGui::Separator();ImGui::TextWrapped("%s",app.adaptive.status.c_str());
                 if(focus.adaptive.area==AdaptiveAreaMode::TargetZone)draw_zone_diagnostics(app.adaptive);
@@ -1285,17 +1313,22 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
             :app.camera.input_blocked?"Input failed / release the hold button to retry"
             :app.camera.lost?app.camera.selection_status:scoped?"Assassinate hitscan / projectile prediction off"
             :focus.prediction?(focus.auto_speed&&!snap.weapon.valid?"Prediction waiting for live weapon data":app.camera.prediction_active?"Prediction active":"Prediction waiting for valid motion / intercept"):"Prediction off";
-        dl->PushClipRect(origin+px(0,522),body.Max,true);text(origin+px(0,526),state,true,12);dl->PopClipRect();
+        const float status_y=ultimate?474.f:526.f;
+        dl->PushClipRect(origin+px(0,status_y-4),body.Max,true);text(origin+px(0,status_y),state,true,12);dl->PopClipRect();
         ImGui::PopStyleVar();ImGui::PopID();
+    } else if(page==shell_page::configurations) {
+        changed|=draw_presets_page(app.settings,config_path().parent_path(),body,
+            [](const Settings& s,const std::filesystem::path& p){save(s,p);},
+            [](const std::filesystem::path& p){return load(p);},[&]{app.cancel_automation("Preset loaded");});
     } else if(page==shell_page::auto_click) {
-        changed|=draw_auto_click_settings(static_cast<CameraFocusSettings&>(app.settings),app.settings.vindicta_ult,
-            app.click_ultimate,app.ult_profile_active,app.ray_click,app.makcu,{origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
+        changed|=draw_auto_click_settings(static_cast<CameraFocusSettings&>(app.settings),false,app.ult_profile_active,
+            app.ray_click,app.makcu,{origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
     } else if(page==shell_page::auto_parry) {
         changed|=draw_auto_parry_settings(app.settings.auto_parry,app.auto_parry,snap.parry,
             {origin,origin+body.GetSize()},alpha,app.settings.transparent_frame);
     } else if(page==shell_page::test) {
         changed|=draw_session_monitor(app.session_monitor,snap,{origin,origin+body.GetSize()},alpha,
-            app.settings.transparent_frame,app.settings.show_monitor_hud,app.makcu.ready(),app.makcu.status(),
+            app.settings.transparent_frame,app.makcu.ready(),app.makcu.status(),
             app.reports_directory,app.settings_window.hwnd);
     } else {
         ImRect status(origin+px(0,60),{body.Max.x,origin.y+px(187)});card(status,"GAME CONNECTION",icons::id::workflow);        badge("connected",dl,status.Min+px(20,45),snap.pid?"Connected":"Waiting for game",snap.pid?badge_good:badge_warn);
@@ -1345,11 +1378,15 @@ void overlay_page(solace::shell_page page,const ImRect& body,float alpha,void* c
         } else text(updates.Min+px(20,122),"Maps and reader reload automatically. Reports include validation details.",true,12);
         dl->PopClipRect();
     }
+    if(ultimate_page) {
+        ImGui::SetCursorScreenPos(origin+px(0,488));ImGui::Dummy({0,0});ImGui::EndChild();
+    }
     if(changed)save(app.settings);ImGui::PopStyleColor();ui_runtime::pop_font();
 }
 void draw_settings(Application& app,const Snapshot& snap) {
     using namespace solace;
     theme_tick(ImGui::GetIO().DeltaTime);
+    apply_overlay_control_style();
     PageContext data{app,snap};shell_extension extension;
     extension.content=overlay_page;extension.context=&data;extension.status=snap.status.c_str();
     extension.close=[](void* context){static_cast<PageContext*>(context)->app.hide_settings();};
@@ -1358,14 +1395,15 @@ void draw_settings(Application& app,const Snapshot& snap) {
     extension.appearance=[](void* context) {
         auto& settings=static_cast<PageContext*>(context)->app.settings;
         ui_runtime::push_font(font_semibold(16));
-        bool changed=ImGui::Checkbox("Transparent frame",&settings.transparent_frame);
+        bool changed=extra_toggle("Transparent frame",settings.transparent_frame);
         if(settings.transparent_frame) {
             ImGui::Text("Frame opacity  %.0f%%",settings.frame_opacity*100);
             changed|=range_slider("frame_opacity",ImGui::GetCursorScreenPos(),px(248),&settings.frame_opacity,.4f,.9f);
         }
         ImGui::TextDisabled("Sidebar, header, empty frame and enemy tags");
-        ImGui::Separator();changed|=ImGui::Checkbox("Mid Boss HUD",&settings.show_midboss_hud);
-        ImGui::Separator();changed|=ImGui::Checkbox("Glass cursor",&settings.glass);
+        ImGui::Separator();changed|=extra_toggle("Glass cursor",settings.glass);
+        changed|=extra_toggle("Visual preview window",settings.extras.visual_preview);
+        changed|=draw_extra_appearance(settings.extras);
         ui_runtime::pop_font();
         if(changed)save(settings);
     };
@@ -1382,6 +1420,115 @@ void draw_settings(Application& app,const Snapshot& snap) {
         SetCursor(glass::enabled()&&glass::cursor_live()?nullptr:LoadCursorW(nullptr,IDC_ARROW));
     if(app.settings.dark!=is_dark()){app.settings.dark=is_dark();save(app.settings);}
     ui_runtime::collect_animation_states();
+}
+bool position_preview(Application& app) {
+    if(!app.settings.extras.visual_preview||!app.show_settings)return false;
+    if(!app.preview_window.hwnd){app.preview_window.preview=true;if(!create_surface(app,app.preview_window,true))return false;}
+    RECT menu{};if(!GetWindowRect(app.settings_window.hwnd,&menu))return false;
+    MONITORINFO info{sizeof(info)};if(!GetMonitorInfoW(MonitorFromWindow(app.settings_window.hwnd,MONITOR_DEFAULTTONEAREST),&info))return false;
+    const auto work=info.rcWork;const float dpi=float(GetDpiForWindow(app.settings_window.hwnd))/96;
+    const float scale=std::min({dpi,float(work.right-work.left-32)/(1168+16+320),float(work.bottom-work.top-32)/768});
+    const int width=int(std::lround(1168*scale)),height=int(std::lround(768*scale)),gap=int(std::lround(16*scale)),preview_width=int(std::lround(320*scale));
+    int left=std::clamp(int(menu.left),int(work.left+16),int(work.right-16-width-gap-preview_width)),top=std::clamp(int(menu.top),int(work.top+16),int(work.bottom-16-height));
+    if(menu.right-menu.left!=width||menu.bottom-menu.top!=height||menu.left!=left||menu.top!=top)
+        SetWindowPos(app.settings_window.hwnd,nullptr,left,top,width,height,SWP_NOZORDER|SWP_NOACTIVATE);
+    RECT previous{};GetWindowRect(app.preview_window.hwnd,&previous);RECT desired{left+width+gap,top,left+width+gap+preview_width,top+height};
+    if(previous.left!=desired.left||previous.top!=desired.top||previous.right!=desired.right||previous.bottom!=desired.bottom)
+        SetWindowPos(app.preview_window.hwnd,HWND_TOPMOST,desired.left,desired.top,preview_width,height,SWP_NOACTIVATE);
+    if(!menu_preview_mode&&!IsWindowVisible(app.preview_window.hwnd))ShowWindow(app.preview_window.hwnd,SW_SHOWNOACTIVATE);
+    return true;
+}
+void update_menu_capture(Application& app) {
+    const auto foreground=GetForegroundWindow();if(foreground!=app.settings_window.hwnd&&foreground!=app.preview_window.hwnd)return;
+    HWND desired=app.settings_window.hwnd;POINT mouse{};GetCursorPos(&mouse);RECT preview{};
+    if(app.preview_window.hwnd&&IsWindowVisible(app.preview_window.hwnd)&&GetWindowRect(app.preview_window.hwnd,&preview)&&PtInRect(&preview,mouse))desired=app.preview_window.hwnd;
+    // Keep an active slider/drag on its original window until the button is released.
+    if(app.settings_window.dragging||(GetAsyncKeyState(VK_LBUTTON)&0x8000))return;
+    if(GetCapture()!=desired)SetCapture(desired);
+}
+bool draw_model_preview(Application& app,const Snapshot* live=nullptr,const ImVec2* sample_cursor=nullptr) {
+    auto& surface=app.preview_window;if(!surface.hwnd)return false;
+    if(!begin_frame(surface))return false;
+    if(menu_preview_mode){ImGui::GetIO().DeltaTime=1.f/60;if(sample_cursor)ImGui::GetIO().MousePos=*sample_cursor;}
+    auto size=ImGui::GetIO().DisplaySize;const float scale=size.x/320;
+    auto& extras=app.settings.extras;auto draw=ImGui::GetBackgroundDrawList();auto font=ImGui::GetFont();
+    const float opacity=app.settings.transparent_frame?app.settings.frame_opacity:1;
+    draw->AddRectFilled({0,0},size,solace::mo::with_alpha(solace::c_background,opacity),24*scale);
+    draw->AddRect({.5f,.5f},size-ImVec2{.5f,.5f},solace::c_border,24*scale);
+    draw->AddText(font,18*scale,{20*scale,20*scale},solace::c_foreground,"Preview");
+    draw->AddText(font,12*scale,{20*scale,46*scale},solace::c_muted_foreground,extras.preview_page?extras.preview_hud_live?"Live HUD data":"Example HUD states":"Vindicta / sample player");
+    bool changed=false;
+    ImGui::SetNextWindowPos({16*scale,66*scale});ImGui::SetNextWindowSize({size.x-32*scale,36*scale});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{0,0});ImGui::Begin("Preview pages",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+    for(int i=0;i<2;++i){auto at=ImVec2{(16+144.f*i)*scale,66*scale};ImGui::SetCursorScreenPos(at);ImGui::PushID(i);
+        if(ImGui::InvisibleButton("page",{140*scale,32*scale})){extras.preview_page=i;changed=true;}
+        auto buttons=ImGui::GetWindowDrawList();const bool active=extras.preview_page==i;
+        buttons->AddRectFilled(at,at+ImVec2{140*scale,32*scale},active?solace::c_primary:solace::c_card,16*scale);
+        const char* label=i?"HUDs":"Player";auto extent=font->CalcTextSizeA(13*scale,FLT_MAX,0,label);
+        buttons->AddText(font,13*scale,at+ImVec2{(140*scale-extent.x)*.5f,(32*scale-extent.y)*.5f},active?solace::c_primary_foreground:solace::c_muted_foreground,label);ImGui::PopID();}
+    ImGui::End();ImGui::PopStyleVar();
+    if(extras.preview_page==0) {
+    const ImVec2 model_at{16*scale,112*scale};const ImVec2 model_size{size.x-32*scale,size.y-306*scale};
+    app.preview_model.initialize(surface.renderer.device(),surface.renderer.context(),executable_directory()/L"data"/L"preview"/L"vindicta.vpreview",GetTickCount64());
+    app.preview_icons.initialize(surface.renderer.device(),surface.renderer.context(),executable_directory()/L"data"/L"icons",GetTickCount64());
+    auto scene=app.preview_model.scene(unsigned(model_size.x),unsigned(model_size.y),extras.preview_yaw,extras.preview_occluded,extras.preview_health);
+    if(auto texture=app.preview_model.render(unsigned(model_size.x),unsigned(model_size.y),scene,extras.preview_yaw)) {
+        draw->AddImage((ImTextureID)(intptr_t)texture,model_at,model_at+model_size);
+        // The original drawing functions operate in this local viewport. Translate
+        // their vertices after drawing so projection and the model share one matrix.
+        const int first=draw->VtxBuffer.Size;const auto& player=scene.players.front();
+        if(app.settings.skeletons)draw_skeleton(draw,player,scene.matrix,model_size.x,model_size.y,app.settings,scale);
+        if(app.settings.hitboxes)draw_hitboxes(draw,player,scene.matrix,model_size.x,model_size.y,app.settings,scale);
+        if(app.settings.enabled||app.settings.healthbar_debug_box) {
+            BarRect bar,bounds;if(player_healthbar_rect(player,scene.matrix,model_size.x,model_size.y,app.settings,bar,&bounds)) {
+                if(app.settings.healthbar_debug_box)draw->AddRect({bounds.left+.5f,bounds.top+.5f},{bounds.right-.5f,bounds.bottom-.5f},IM_COL32(98,180,255,230));
+                if(app.settings.enabled&&enemy_visual_visibility_allows(scene,player,app.settings.hide_visible_healthbars))draw_vertical_bar(draw,bar,player.health,player.maximum,app.settings,scale);
+            }
+        }
+        if(app.settings.hidden_enemy_tags||extras.player_distance)draw_hidden_enemy_tag(draw,scene,player,model_size.x,model_size.y,app.settings,scale,app.preview_icons);
+        for(int i=first;i<draw->VtxBuffer.Size;++i)draw->VtxBuffer[i].pos+=model_at;
+    }else draw->AddText(font,13*scale,model_at+ImVec2{4*scale,24*scale},solace::c_muted_foreground,app.preview_model.status.c_str());
+    // Interactive preview-only controls. They never alter the game or enable a feature.
+    ImGui::SetNextWindowPos({16*scale,size.y-180*scale});ImGui::SetNextWindowSize({size.x-32*scale,172*scale});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{4*scale,2*scale});
+    ImGui::Begin("Preview sample controls",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PushFont(font,13*scale);ImGui::PushStyleColor(ImGuiCol_Text,ImGui::ColorConvertU32ToFloat4(solace::c_foreground));
+    auto at=ImGui::GetCursorScreenPos();ImGui::TextUnformatted("Occluded");
+    app.preview_occluded_control={{size.x-72*scale,at.y},{size.x-24*scale,at.y+28*scale}};
+    changed|=solace::switch_toggle("preview_occluded",app.preview_occluded_control.Min,&extras.preview_occluded);
+    ImGui::SetCursorScreenPos({at.x,at.y+36*scale});ImGui::Text("Health   %.0f%%",extras.preview_health*100);
+    app.preview_health_control={ImGui::GetCursorScreenPos(),ImGui::GetCursorScreenPos()+ImVec2{size.x-40*scale,40*scale}};
+    changed|=solace::range_slider("preview_health",app.preview_health_control.Min,app.preview_health_control.GetWidth(),&extras.preview_health,.01f,1);
+    ImGui::TextUnformatted("Turn");changed|=solace::range_slider("preview_turn",ImGui::GetCursorScreenPos(),size.x-40*scale,&extras.preview_yaw,-180,180);
+    ImGui::PopStyleColor();ImGui::PopFont();ImGui::End();ImGui::PopStyleVar();
+    }else {
+        const float hud_scale=scale;const float left=(size.x/scale-hud_card_width)*.5f;
+        MidBossState boss;boss.valid=true;boss.phase=MidBossPhase::Countdown;boss.remaining=134;
+        RiftState rift;rift.valid=rift.timer_valid=rift.estimated=true;rift.phase=RiftPhase::Countdown;rift.remaining=43;rift.lane=6;
+        ParryReadState parry;parry.valid=parry.ready=true;AutoParry controller;controller.status="Watching incoming attacks";
+        if(extras.preview_hud_live&&live){boss=live->midboss;rift=live->rift;parry=live->parry;}
+        draw_midboss_hud(draw,boss,hud_scale,{left,128},opacity);
+        draw_rift_hud(draw,rift,hud_scale,{left,188},opacity);
+        draw_auto_parry_hud(draw,extras.preview_hud_live?app.auto_parry:controller,parry,hud_scale,{left,248},opacity);
+        if(!extras.preview_hud_live){controller.decision.valid=true;controller.decision.kind=ParryThreatKind::HeavyMelee;controller.decision.impact_ms=82;draw_auto_parry_hud(draw,controller,parry,hud_scale,{left,328},opacity);}
+        char session_value[32]{},watchers[24]{};snprintf(session_value,sizeof(session_value),"%.0f FPS",extras.preview_hud_live?app.render_fps:240);
+        snprintf(watchers,sizeof(watchers),"%zu",extras.preview_hud_live&&live?live->spectators.size():size_t(2));
+        auto details=extras.preview_hud_live&&live?(live->spectators.empty()?std::string("No spectators"):live->spectators.front()):std::string("2 watching");
+        draw_hud_card(draw,ImVec2{left,408}*scale,scale,"Session",session_value,extras.preview_hud_live?"Current overlay frame rate":"Read 1.32 ms / Input 0.8 ms",HudGlyph::Activity,solace::c_foreground,opacity);
+        draw_hud_card(draw,ImVec2{left,468}*scale,scale,"Spectators",watchers,details.c_str(),HudGlyph::Eye,solace::c_foreground,opacity);
+        ImGui::SetNextWindowPos({20*scale,size.y-84*scale});ImGui::SetNextWindowSize({size.x-40*scale,72*scale});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{0,0});ImGui::Begin("HUD sample controls",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+        auto at=ImGui::GetCursorScreenPos();ImGui::TextUnformatted("Live data");changed|=solace::switch_toggle("hud_live",{size.x-72*scale,at.y},&extras.preview_hud_live);
+        ImGui::SetCursorScreenPos(at+ImVec2{0,36*scale});ImGui::TextDisabled("HUDs / display settings");ImGui::End();ImGui::PopStyleVar();
+    }
+    if(app.settings.glass) {
+        auto options=solace::glass::settings();options.opacity=.9f;options.border_glow=.3f;options.specular_gain=.5f;
+        solace::glass::cursor(ImGui::GetForegroundDrawList(),{{0,0},size},options);
+    }
+    POINT pointer{};GetCursorPos(&pointer);ScreenToClient(surface.hwnd,&pointer);
+    if(GetForegroundWindow()==surface.hwnd&&pointer.x>=0&&pointer.y>=0&&pointer.x<size.x&&pointer.y<size.y)
+        SetCursor(app.settings.glass&&solace::glass::cursor_live()?nullptr:LoadCursorW(nullptr,IDC_ARROW));
+    if(changed)save(app.settings);solace::ui_runtime::collect_animation_states();return end_frame(surface);
 }
 HWND game_window(DWORD pid) {
     struct Find {DWORD pid;HWND hwnd;} find{pid,nullptr};
@@ -1423,7 +1570,7 @@ bool capture(Surface& s,const std::filesystem::path& path,bool require_transpare
     if(FAILED(frame->SetPixelFormat(&format))||format!=GUID_WICPixelFormat32bppBGRA)return false;
     return SUCCEEDED(frame->WritePixels(desc.Height,desc.Width*4,static_cast<UINT>(pixels.size()),pixels.data()))&&SUCCEEDED(frame->Commit())&&SUCCEEDED(encoder->Commit());
 }
-int menu_previews(const std::filesystem::path& directory) {
+int menu_previews(const std::filesystem::path& directory,bool vindicta_only=false) {
     // Render the real menu into hidden surfaces. No game reader, input worker,
     // serial port, settings write or desktop interaction is used by this path.
     menu_preview_mode=true;CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -1440,18 +1587,25 @@ int menu_previews(const std::filesystem::path& directory) {
     snapshot.hero.sniper_present=snapshot.hero.sniper_valid=true;snapshot.hero.ability_status="Assassinate idle";
     snapshot.projection={true,71.1f,43.8f,16.f/9};snapshot.weapon.valid=true;snapshot.weapon.speed=25984;
     bool ok=create_surface(app,app.settings_window,false);
-    auto render=[&](solace::shell_page page,const wchar_t* name) {
+    auto render=[&](solace::shell_page page,const wchar_t* name,ImVec2 hover=ImVec2{-FLT_MAX,-FLT_MAX}) {
         app.menu_page=page;app.page=int(page);app.page_time=1.f;
         for(int i=0;i<16&&ok;++i) {
             ok=begin_frame(app.settings_window);
             if(ok) {
-                auto& io=ImGui::GetIO();io.DeltaTime=1.f/30;io.MousePos={-FLT_MAX,-FLT_MAX};
+                auto& io=ImGui::GetIO();io.DeltaTime=1.f/30;io.MousePos=hover;
                 for(auto& down:io.MouseDown)down=false;
                 draw_settings(app,snapshot);render_frame(app.settings_window);
             }
         }
         if(ok)ok=capture(app.settings_window,directory/name);
     };
+    if(ok&&vindicta_only) {
+        render(solace::shell_page::vindicta_ult,L"vindicta-camera.png");
+        app.vindicta_section=1;render(solace::shell_page::vindicta_ult,L"vindicta-auto-click.png");
+        app.vindicta_section=2;app.auto_select.status="Monitoring / no visible lethal target below 49%";
+        render(solace::shell_page::vindicta_ult,L"vindicta-auto-select.png");
+        app.settings_window.shutdown();CoUninitialize();return ok?0:2;
+    }
     if(ok) {
         render(solace::shell_page::auto_click,L"auto-click-orbs.png");
         render(solace::shell_page::camera,L"camera-focus.png");
@@ -1470,15 +1624,118 @@ int menu_previews(const std::filesystem::path& directory) {
         app.settings.vindicta_ult.x2_target_lock=false;
         app.settings.vindicta_ult.free_focus=false;
         render(solace::shell_page::vindicta_ult,L"vindicta-ultimate-fixed.png");
+        app.vindicta_section=1;app.auto_select.status="Preview / monitoring lethal targets";
+        app.ray_click.status="Preview / waiting for an enemy under the crosshair";
+        render(solace::shell_page::vindicta_ult,L"vindicta-auto-click.png");
+        app.vindicta_section=2;render(solace::shell_page::vindicta_ult,L"vindicta-auto-select.png");
+        app.vindicta_section=0;
         app.ult_profile_active=false;snapshot.hero.sniper_scoped=false;
+        app.settings.extras.crosshair=true;
+        render(solace::shell_page::hud,L"hud-settings.png");
+        render(solace::shell_page::hud,L"hud-rift-testing.png",rift_testing_control.GetCenter());
         render(solace::shell_page::health,L"health-bars.png");
         app.settings.healthbar_debug_box=true;
         render(solace::shell_page::health,L"health-bars-debug.png");
         render(solace::shell_page::auto_parry,L"auto-parry.png");
         app.settings.auto_click_orbs_only=false;app.ray_click.status="Preview / hold either side button";
         render(solace::shell_page::auto_click,L"auto-click-players.png");
+        const wchar_t* sections[]={L"visual-health.png",L"visual-skeletons.png",L"visual-tags.png",L"visual-world.png",L"visual-minimap.png"};
+        app.settings.extras.hero_icons=app.settings.extras.player_distance=true;
+        for(int tab=0;tab<5;++tab){visual_preview_section=tab;render(solace::shell_page::health,sections[tab]);}
+        // Exercise the actual queued dropdown through ImGui only. No desktop input.
+        visual_preview_section=4;render(solace::shell_page::health,L"minimap-before-selection.png");
+        const auto trigger=minimap_corner_control;
+        auto input_frame=[&](ImVec2 mouse,int edge) {
+            auto& io=ImGui::GetIO();io.AddMousePosEvent(mouse.x,mouse.y);if(edge>=0)io.AddMouseButtonEvent(0,edge!=0);
+            if(!begin_frame(app.settings_window)){ok=false;return;}io.DeltaTime=1.f/60;draw_settings(app,snapshot);render_frame(app.settings_window);
+        };
+        input_frame(trigger.GetCenter(),-1);input_frame(trigger.GetCenter(),1);input_frame(trigger.GetCenter(),0);
+        for(int i=0;i<18&&ok;++i)input_frame(trigger.GetCenter(),-1);
+        const bool dropdown_open=solace::overlay_open();if(ok)ok=capture(app.settings_window,directory/L"minimap-dropdown-open.png");
+        ImVec2 first_option{trigger.Min.x+solace::px(35),trigger.Max.y+solace::px(25)};
+        input_frame(first_option,1);input_frame(first_option,0);for(int i=0;i<18&&ok;++i)input_frame(first_option,-1);
+        const bool selected=app.settings.extras.minimap_corner==0;std::ofstream dropdown_report(directory/L"dropdown-check.json");
+        dropdown_report<<"{\"opened\":"<<(dropdown_open?"true":"false")<<",\"selected_top_left\":"<<(selected?"true":"false")<<",\"desktop_input\":false}\n";
+        ok=ok&&dropdown_open&&selected;
+        if(ok)ok=capture(app.settings_window,directory/L"minimap-after-selection.png");
+        visual_preview_section=-1;
+        render(solace::shell_page::configurations,L"configurations.png");
+        external_preview_expanded=true;menu_preview_popup=1;render(solace::shell_page::camera,L"tracking-controls.png");
+        external_preview_expanded=true;render(solace::shell_page::vindicta_ult,L"vindicta-profile-options.png");external_preview_expanded=false;
+        menu_preview_popup=0;
     }
     app.settings_window.shutdown();CoUninitialize();return ok?0:2;
+}
+int world_previews(const std::filesystem::path& directory,const std::filesystem::path& profile) {
+    // Hidden, read-only capture. It never starts an input worker or changes preferences.
+    menu_preview_mode=true;CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);std::filesystem::create_directories(directory);
+    Application app;app.settings=Settings{};app.settings.extras.world=app.settings.extras.minimap=true;
+    app.settings.extras.world_range=500;app.settings.extras.minimap_size=400;app.settings.extras.minimap_corner=1;
+    app.settings.hidden_enemy_tags=app.settings.extras.hero_icons=app.settings.extras.player_distance=true;app.settings.hide_visible_enemy_tags=false;
+    GameReader reader(profile);Snapshot snapshot;ReadOptions options;options.metadata=options.decorations=options.world=options.minimap=true;
+    for(int i=0;i<4;++i){snapshot=reader.sample(options);Sleep(10);}
+    bool ok=snapshot.projection.valid&&create_surface(app,app.bar_window,true);
+    if(ok){SetWindowPos(app.bar_window.hwnd,nullptr,0,0,1280,720,SWP_NOACTIVATE|SWP_NOZORDER);app.game_icons.initialize(app.bar_window.renderer.device(),app.bar_window.renderer.context(),executable_directory()/L"data"/L"icons",GetTickCount64());
+        for(int frame=0;frame<4&&ok;++frame){ok=begin_frame(app.bar_window);if(ok){auto draw=ImGui::GetBackgroundDrawList();draw->AddRectFilled({0,0},{1280,720},IM_COL32(16,19,25,255));
+            draw_world_markers(draw,snapshot,app.settings.extras,app.game_icons,1280,720,1,.85f);draw_game_minimap(draw,snapshot,app.settings.extras,app.game_icons,1280,720,1,1);
+            for(const auto& p:snapshot.players)draw_hidden_enemy_tag(draw,snapshot,p,1280,720,app.settings,1,app.game_icons);
+            draw->AddText({24,24},IM_COL32_WHITE,"Read-only live map / marker preview");
+            int index{};for(int id:{3,84,85,86,88}){auto at=ImVec2{50.f+index*74,635};if(auto icon=app.game_icons.hero(id))GameIcons::draw(draw,*icon,at,42);++index;}
+            render_frame(app.bar_window);}}
+        if(ok)ok=capture(app.bar_window,directory/L"live-world.png");
+        std::ofstream report(directory/L"live-world.json");write_external_data(report,snapshot);
+        // Main-map fixture uses the bounds captured from this installed build.
+        // Exercise the same exported paths and renderer without changing maps.
+        Snapshot sample;sample.map_name="dl_midtown";sample.world.bounds_valid=true;
+        sample.world.mins={-10752,-10752,0};sample.world.maxs={10752,10752,0};sample.world.lane_source="installed_map";
+        MapLaneCache paths;sample.world.lanes=paths.get(executable_directory()/L"data"/L"map-lanes",sample.map_name,GetTickCount64());
+        auto style=app.settings.extras;style.minimap_players=style.minimap_world=false;style.minimap_lanes=true;style.minimap_size=560;
+        for(int shown=1;shown>=0&&ok;--shown){style.minimap_lanes=shown!=0;
+            for(int frame=0;frame<3&&ok;++frame){ok=begin_frame(app.bar_window);if(ok){auto draw=ImGui::GetBackgroundDrawList();draw->AddRectFilled({0,0},{1280,720},IM_COL32(16,19,25,255));draw_game_minimap(draw,sample,style,app.game_icons,1280,720,1,1);render_frame(app.bar_window);}}
+            if(ok)ok=capture(app.bar_window,directory/(shown?L"main-map-lanes.png":L"main-map-lanes-off.png"));
+        }
+        std::ofstream sample_report(directory/L"main-map-lanes.json");sample_report<<"{\"fixture\":true,\"game_inputs\":false,\"lanes\":"<<sample.world.lanes.size()<<",\"numbers\":[";
+        bool first=true;for(const auto& path:sample.world.lanes){if(!first)sample_report<<',';first=false;sample_report<<path.number;}sample_report<<"]}\n";
+        ok=ok&&sample.world.lanes.size()==3;
+    }
+    app.game_icons.clear();app.bar_window.shutdown();CoUninitialize();return ok?0:2;
+}
+int model_previews(const std::filesystem::path& directory) {
+    menu_preview_mode=true;CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);std::filesystem::create_directories(directory);
+    Application app;app.settings=Settings{};app.show_settings=true;app.settings.transparent_frame=false;
+    app.settings.skeletons=app.settings.hitboxes=app.settings.hidden_enemy_tags=true;
+    app.settings.hide_visible_enemy_tags=false;app.settings.extras.hero_icons=app.settings.extras.player_distance=true;
+    bool ok=create_surface(app,app.settings_window,false)&&position_preview(app);
+    auto render=[&](const wchar_t* file){for(int i=0;i<4&&ok;++i)ok=draw_model_preview(app);if(ok)ok=app.preview_model.ready()&&capture(app.preview_window,directory/file);};
+    bool toggle_works=false,slider_works=false,preview_glass=false,menu_glass=false,separate_backdrops=false;
+    if(ok){render(L"visible.png");
+        auto input_frame=[&](ImVec2 at,int edge){auto& io=ImGui::GetIO();io.AddMousePosEvent(at.x,at.y);if(edge>=0)io.AddMouseButtonEvent(0,edge!=0);ok=ok&&draw_model_preview(app);};
+        auto toggle=app.preview_occluded_control.GetCenter();input_frame(toggle,-1);input_frame(toggle,-1);input_frame(toggle,1);input_frame(toggle,0);
+        toggle_works=app.settings.extras.preview_occluded;
+        auto slider=app.preview_health_control.GetCenter();slider.x=app.preview_health_control.Min.x+app.preview_health_control.GetWidth()*.4f;
+        input_frame(slider,-1);input_frame(slider,1);input_frame(slider,0);slider_works=std::abs(app.settings.extras.preview_health-.406f)<.025f;
+        ok=ok&&toggle_works&&slider_works;
+        render(L"occluded.png");app.settings.extras.preview_yaw=110;render(L"turned.png");
+        app.settings.extras.preview_yaw=-160;render(L"rig-side.png");app.settings.extras.preview_yaw=-90;render(L"rig-front.png");
+        app.settings.hitboxes=app.settings.skeletons=false;app.settings.extras.preview_occluded=false;
+        app.settings.extras.preview_yaw=-160;render(L"model-side.png");app.settings.extras.preview_yaw=-90;render(L"model-front.png");
+        // Synthetic ImGui cursor positions exercise only the two hidden surfaces.
+        // No Windows mouse events, input worker or settings writes are involved.
+        for(int i=0;i<24&&ok;++i){ImVec2 at{144.f+i*.3f,285.f};ok=draw_model_preview(app,nullptr,&at);}
+        preview_glass=solace::glass::cursor_live()&&solace::snapshot::backdrop_ready();
+        auto preview_backdrop=solace::snapshot::backdrop();if(ok)ok=capture(app.preview_window,directory/L"preview-glass.png");
+        Snapshot sample;sample.status="HUD preview";sample.hero.name="Vindicta";app.menu_page=solace::shell_page::health;
+        for(int i=0;i<24&&ok;++i){ok=begin_frame(app.settings_window);if(ok){auto& io=ImGui::GetIO();io.DeltaTime=1.f/60;io.MousePos={600.f+i*.3f,360.f};draw_settings(app,sample);render_frame(app.settings_window);}}
+        menu_glass=solace::glass::cursor_live()&&solace::snapshot::backdrop_ready();
+        separate_backdrops=preview_backdrop!=solace::snapshot::backdrop();
+        ImGui::SetCurrentContext(app.preview_window.context);
+        separate_backdrops=separate_backdrops&&solace::snapshot::backdrop()==preview_backdrop&&solace::glass::cursor_live();
+        app.settings.extras.preview_page=1;render(L"hud-samples.png");
+        app.settings.transparent_frame=true;app.settings.frame_opacity=.4f;render(L"hud-transparent.png");
+        ok=ok&&preview_glass&&menu_glass&&separate_backdrops;}
+    std::ofstream report(directory/L"model-preview.json");report<<"{\"ready\":"<<(app.preview_model.ready()?"true":"false")<<",\"triangles\":"<<app.preview_model.triangle_count<<",\"model_renders\":"<<app.preview_model.model_renders<<",\"status\":";
+    external_json_string(report,app.preview_model.status);report<<",\"toggle_works\":"<<(toggle_works?"true":"false")<<",\"slider_works\":"<<(slider_works?"true":"false")<<",\"preview_glass\":"<<(preview_glass?"true":"false")<<",\"menu_glass\":"<<(menu_glass?"true":"false")<<",\"separate_backdrops\":"<<(separate_backdrops?"true":"false")<<",\"desktop_input\":false}\n";
+    app.preview_model.reset();app.preview_icons.clear();app.preview_window.shutdown();app.settings_window.shutdown();CoUninitialize();return ok?0:2;
 }
 int render_test() {
     CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -1642,7 +1899,7 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
     std::jthread reader([&](std::stop_token stop) {
         GameReader game;FramePacer sample_pacer;unsigned revision{};while(!stop.stop_requested()) {
             auto next_revision=app.data_revision.load();if(next_revision!=revision){game.refresh_data();revision=next_revision;}
-            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0,(flags&16)!=0,(flags&32)!=0,(flags&64)!=0,(flags&128)!=0,(flags&256)!=0,(flags&512)!=0});
+            auto flags=app.read_options.load();auto s=game.sample({(flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0,(flags&16)!=0,(flags&32)!=0,(flags&64)!=0,(flags&128)!=0,(flags&256)!=0,(flags&512)!=0,(flags&1024)!=0,(flags&2048)!=0,(flags&8192)!=0,(flags&16384)!=0,(flags&32768)!=0,(flags&65536)!=0,(flags&131072)!=0,(flags&262144)!=0,(flags&524288)!=0,(flags&1048576)!=0,(flags>>21)&31u,(flags&(1u<<26))!=0,(flags&(1u<<27))!=0});
             {
                 std::lock_guard lock(app.mutex);
                 // An active renderer update is a seqlock retry, not an invalid
@@ -1659,12 +1916,12 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
     if(shutdown_test)close_test=std::jthread([] {Sleep(500);console_handler(CTRL_CLOSE_EVENT);});
     if(settings_at_start)app.open_settings();
     bool insert_down=false;uint64_t last_report{},next_display_check{},fps_epoch=GetTickCount64();
-    uint64_t rendered_frames{};FramePacer render_pacer;GameFrames game_frames;
+    uint64_t rendered_frames{};FramePacer render_pacer;RenderLimit render_limit;GameFrames game_frames;int previous_hitboxes{};
     if(trace_frames&&!shutdown_test)game_frames.start();
     HWND cached_game{};DWORD cached_pid{},observed_reader_pid{};uint64_t next_window_check{};
     double work_sum{},wait_sum{},submit_sum{},present_sum{},queue_wait_sum{},work_max{},present_max{};uint64_t timing_frames{};
     while(!app.quit&&!shutdown_requested.load()) {
-        auto loop_start=clock_ms();app.bar_window.submit_ms=app.bar_window.present_ms=app.settings_window.submit_ms=app.settings_window.present_ms=0;
+        auto loop_start=clock_ms();app.bar_window.submit_ms=app.bar_window.present_ms=app.settings_window.submit_ms=app.settings_window.present_ms=app.preview_window.submit_ms=app.preview_window.present_ms=0;
         app.data_update.poll();if(app.data_update.consume_finished())++app.data_revision;
         MSG message{};while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){if(message.message==WM_QUIT)app.quit=true;TranslateMessage(&message);DispatchMessageW(&message);}if(app.quit)break;
         Snapshot snapshot;{std::lock_guard lock(app.mutex);snapshot=app.snapshot;}
@@ -1680,60 +1937,87 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
             next_display_check=GetTickCount64()+1000;
         }
         HWND foreground=GetForegroundWindow();
-        bool focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd);
+        bool focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd||foreground==app.preview_window.hwnd);
         bool key=(GetAsyncKeyState(VK_INSERT)&0x8000)!=0;
         if(key&&!insert_down&&focused){if(app.show_settings)app.hide_settings();else app.open_settings();}insert_down=key;
         foreground=GetForegroundWindow();
-        focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd);
+        focused=render_active(game!=nullptr,game&&IsIconic(game),foreground==game,app.show_settings,foreground==app.settings_window.hwnd||foreground==app.preview_window.hwnd);
         app.sync_input_backend();
-        const auto& control=app.focus_profile(snapshot);
+        const auto& saved_control=app.focus_profile(snapshot);
+        CameraFocusSettings control=saved_control;
+        const bool owned_activation=app.auto_select.owns_key(control.tracking.activation_key)||app.auto_select.owns_key(control.tracking.second_key)||app.makcu.click_pulse_active();
+        const auto& movement_snapshot=app.extended_camera.prepare(snapshot,control,game,app.show_settings,owned_activation,app.ult_scope_active?1:0,app.makcu.backend_generation());
+        if(app.extended_camera.selection_changed){app.makcu.cancel_motion();app.camera.release();app.adaptive.release();}
+        if(control.tracking.enabled&&control.tracking.fixed_lead&&!app.ult_scope_active){control.prediction=true;control.adaptive.prediction=true;}
         const bool x2_down=focus_button_held(FocusHoldButton::X2);
-        const auto activation=resolve_focus_activation(control,x2_down,app.target_lock.active());
+        auto activation=resolve_focus_activation(control,x2_down,app.target_lock.active());
+        if(control.tracking.enabled&&!activation.target_lock)activation.button=FocusHoldButton::Lease;
         const bool adaptive_active=adaptive_mode(control);
         bool hitbox_focus=control.free_focus&&(control.free_focus_mode==FreeMovementMode::Hitboxes||adaptive_active)
             &&(control.replay_focus||control.focus_visuals||(adaptive_active&&control.adaptive.area==AdaptiveAreaMode::TargetZone&&control.adaptive.show_target_zone))
             &&(control.focus_players||control.focus_minions);
         const bool zone_geometry=control.adaptive.area==AdaptiveAreaMode::TargetZone&&(control.replay_focus||control.adaptive.show_target_zone);
         const bool visual_visibility_geometry=app.settings.hidden_enemy_tags||(app.settings.enabled&&app.settings.hide_visible_healthbars);
-        app.read_options.store((app.settings.skeletons?1u:0u)|((control.focus_minions||control.auto_click)?2u:0u)|((control.focus_orbs||(control.auto_click&&control.auto_click_orbs_only))?4u:0u)|((app.settings.hitboxes||hitbox_focus||control.auto_click||visual_visibility_geometry||zone_geometry)?8u:0u)|((adaptive_active||app.ult_scope_active||control.x2_target_lock)?16u:0u)|(app.settings.show_midboss_hud?32u:0u)
-            |(app.settings.auto_parry.enabled?64u:0u)|((app.settings.auto_parry.enabled&&app.settings.auto_parry.counterspell)?128u:0u)|(app.settings.hidden_enemy_tags?256u:0u)|((app.settings.enabled||app.settings.healthbar_debug_box)?512u:0u));
+        const bool hero_shots=app.settings.vindicta_auto_select.enabled&&(vindicta(snapshot.hero)||app.auto_select.active());
+        const auto& world_preferences=app.settings.extras;
+        const unsigned world_mask=(world_preferences.world_lane?1u:0u)|(world_preferences.world_jungle?2u:0u)|(world_preferences.world_breakables?4u:0u)|(world_preferences.world_pickups?8u:0u)|(world_preferences.world_spawners?16u:0u);
+        app.read_options.store((app.settings.skeletons?1u:0u)|((control.focus_minions||control.auto_click||hero_shots)?2u:0u)|((control.focus_orbs||control.auto_click||hero_shots)?4u:0u)|((app.settings.hitboxes||hitbox_focus||control.auto_click||hero_shots||visual_visibility_geometry||zone_geometry)?8u:0u)|((adaptive_active||app.ult_scope_active||control.x2_target_lock||(control.tracking.enabled&&control.tracking.fixed_lead))?16u:0u)|(app.settings.show_midboss_hud?32u:0u)
+            |(app.settings.auto_parry.enabled?64u:0u)|((app.settings.auto_parry.enabled&&app.settings.auto_parry.counterspell)?128u:0u)|((app.settings.hidden_enemy_tags||app.settings.extras.player_distance||hero_shots)?256u:0u)|((app.settings.enabled||app.settings.healthbar_debug_box)?512u:0u)
+            |(control.tracking.enabled?2048u:0u)|(app.settings.extras.spectators?8192u:0u)
+            |(hero_shots?16384u:0u)|((app.settings.auto_parry.enabled&&app.settings.auto_parry.puddle)?65536u:0u)|(control.tracking.enabled?32768u:0u)
+            |((app.settings.extras.world||(app.settings.extras.minimap&&app.settings.extras.minimap_world))?131072u:0u)|(app.settings.extras.minimap?262144u:0u)
+            |(app.settings.extras.minimap_lanes?524288u:0u)|(app.settings.extras.minimap_players?1048576u:0u)|(world_mask<<21)|(app.settings.extras.rift_hud?(1u<<26):0u)|(hero_shots?(1u<<27):0u));
+        const auto parry_candidate=find_parry_threat(snapshot,app.settings.auto_parry,GetTickCount64());
+        const bool parry_preempts=app.settings.auto_parry.enabled&&!app.settings.auto_parry.observe_only&&snapshot.parry.ready&&parry_candidate.valid;
+        app.auto_select.tick(app.makcu,snapshot,app.settings.vindicta_auto_select,game,focused&&!app.show_settings,parry_preempts);
+        const bool sequence_active=app.auto_select.active();
         const auto previous_moves=app.camera.moves+app.adaptive.moves+app.target_lock.moves;
-        app.adaptive.prepare(snapshot,control);
         // Both input backends appear in Windows button state; do not let an injected
         // pulse become the activation key for left-mouse camera focus.
         const bool injected_hold=activation.button==FocusHoldButton::LeftMouse&&app.makcu.click_pulse_active();
-        app.target_lock.update(app.makcu,snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation,x2_down);
-        if(app.target_lock.active()) {
-            app.camera.release();app.adaptive.release();
-        }else if(adaptive_active) {
-            app.camera.release();
-            app.adaptive.update(app.makcu,snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation);
+        if(sequence_active) {
+            // Ordinary controllers cancel their previous queued motion even when
+            // disabled. Do not let them discard Auto Select's serial correction.
+            app.camera.release();app.adaptive.release("Auto Select owns camera");app.target_lock.invalidate("Auto Select owns camera / release X2");
         }else {
-            app.adaptive.release();
-            app.camera.update(app.makcu,snapshot,game,control.replay_focus&&!injected_hold,control.debug_focus,control.exclude_teammates,app.show_settings,
-                control.focus_bone,activation.speed,control.free_focus,control.prediction&&!app.ult_scope_active,control.projectile_speed,
-                control.inherit_velocity,control.auto_speed,control.visible_only,{control.focus_players,control.focus_minions,control.focus_orbs,control.strict_enemy_players},
-                focus_area_settings(control),clock_ms(),control.free_focus_mode,activation.button,&app.adaptive.zones(),app.ult_scope_active);
+            app.adaptive.prepare(movement_snapshot,control);
+            app.target_lock.update(app.makcu,movement_snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation,x2_down);
+            if(app.target_lock.active()) {
+                app.camera.release();app.adaptive.release();
+            }else if(adaptive_active) {
+                app.camera.release();
+                app.adaptive.update(app.makcu,movement_snapshot,game,control,app.show_settings,app.ult_scope_active,control.replay_focus&&!injected_hold,clock_ms(),activation);
+            }else {
+                app.adaptive.release();
+                app.camera.update(app.makcu,movement_snapshot,game,control.replay_focus&&!injected_hold,control.debug_focus,control.exclude_teammates,app.show_settings,
+                    control.focus_bone,activation.speed,control.free_focus,control.prediction&&!app.ult_scope_active,control.projectile_speed,
+                    control.inherit_velocity,control.auto_speed,control.visible_only,{control.focus_players,control.focus_minions,control.focus_orbs,control.strict_enemy_players},
+                    focus_area_settings(control),clock_ms(),control.free_focus_mode,activation.button,&app.adaptive.zones(),app.ult_scope_active,!app.ult_scope_active&&control.tracking.enabled&&control.tracking.fixed_lead?control.tracking.lead:-1.f);
+            }
         }
-        app.ray_click.update(app.makcu,snapshot,game,control.auto_click,app.show_settings,control.click_interval_ms,app.camera.moves+app.adaptive.moves+app.target_lock.moves!=previous_moves,control.auto_click_orbs_only,control.auto_click_orbs_hold_side);
+        app.extended_camera.observe(app.target_lock.active()?app.target_lock.solution.target:adaptive_active?app.adaptive.target():app.camera.target);
+        if(hero_shots&&(sequence_active||snapshot.hero.sniper_scoped)) {
+            app.ray_click.hit={};app.ray_click.status="Auto Select owns Assassinate firing";
+        }else app.ray_click.update(app.makcu,snapshot,game,control.auto_click&&!sequence_active,app.show_settings,control.click_interval_ms,app.camera.moves+app.adaptive.moves+app.target_lock.moves!=previous_moves,control.auto_click_orbs_only,control.auto_click_orbs_hold_side);
         app.auto_parry.update(app.makcu,snapshot,game,app.settings.auto_parry,app.show_settings);
         app.sampling=focused;
+        const bool render_due=render_limit.due(clock_ms(),focused?app.settings.extras.render_cap:0,app.target_hz);
         // Input and foreground checks run before GPU pacing. A saturated queue is
         // polled with a bounded wait, without dropping a prepared render frame.
         auto& pacing_surface=IsWindowVisible(app.bar_window.hwnd)?app.bar_window:app.settings_window;
         auto queue_wait_start=clock_ms();
-        if(focused&&IsWindowVisible(pacing_surface.hwnd)&&!pacing_surface.renderer.wait_for_frame(4))continue;
+        if(render_due&&focused&&IsWindowVisible(pacing_surface.hwnd)&&!pacing_surface.renderer.wait_for_frame(4))continue;
         auto queue_wait_ms=clock_ms()-queue_wait_start;
         // Keep activation, prediction and the zone outline on the same snapshot.
         // The next loop picks up newer data after the bounded GPU wait.
         const auto& focus=control;
         const bool health_display_active=health_visuals_active(app.settings.health_visuals);
-        const bool enemy_tags_active=health_display_active&&app.settings.hidden_enemy_tags;
-        const bool health_features_active=health_display_active&&(app.settings.enabled||app.settings.skeletons||app.settings.hitboxes||app.settings.healthbar_debug_box||app.settings.hidden_enemy_tags);
-        bool visible=focused&&(health_features_active||app.settings.show_midboss_hud||app.settings.show_monitor_hud||show_focus_area(focus)||(focus.focus_visuals&&(focus.free_focus||focus.replay_focus))
+        const bool enemy_tags_active=health_display_active&&(app.settings.hidden_enemy_tags||app.settings.extras.player_distance);
+        const bool health_features_active=health_display_active&&(app.settings.enabled||app.settings.skeletons||app.settings.hitboxes||app.settings.healthbar_debug_box||app.settings.hidden_enemy_tags||app.settings.extras.player_distance);
+        bool visible=focused&&(app.settings.extras.world||app.settings.extras.minimap||app.settings.extras.rift_hud||app.settings.extras.spectators||app.settings.extras.crosshair||health_features_active||app.settings.show_midboss_hud||app.settings.show_monitor_hud||show_focus_area(focus)||(hero_shots&&app.settings.vindicta_auto_select.show_area)||(focus.focus_visuals&&(focus.free_focus||focus.replay_focus))
             ||(app.settings.auto_parry.enabled&&(app.settings.auto_parry.show_hud||app.settings.auto_parry.show_threat)))&&fresh(GetTickCount64(),snapshot.time);
-        app.sampling=focused;app.bars=app.hidden_tags=0;int drawn_hitboxes=0;bool rendered=false,bar_raised=false;
-        if(visible) {
+        app.sampling=focused;if(render_due)app.bars=app.hidden_tags=0;int drawn_hitboxes=render_due?0:previous_hitboxes;bool rendered=false,bar_raised=false;
+        if(visible&&render_due) {
             RECT r{};POINT origin{};if(!GetClientRect(game,&r)||!ClientToScreen(game,&origin)||r.right<=0||r.bottom<=0)visible=false;
             else {
                 RECT old{};GetWindowRect(app.bar_window.hwnd,&old);
@@ -1744,9 +2028,28 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
                 if(!IsWindowVisible(app.bar_window.hwnd)){ShowWindow(app.bar_window.hwnd,SW_SHOWNOACTIVATE);bar_raised=true;}
                 if(!begin_frame(app.bar_window)){app.quit=true;break;}
                 auto draw=ImGui::GetBackgroundDrawList();float scale=float(GetDpiForWindow(game))/96;
+                if(enemy_tags_active||app.settings.extras.world||app.settings.extras.minimap)
+                    app.game_icons.initialize(app.bar_window.renderer.device(),app.bar_window.renderer.context(),executable_directory()/L"data"/L"icons",GetTickCount64());
+                const float visual_opacity=app.settings.transparent_frame?app.settings.frame_opacity:1.f;
+                draw_world_markers(draw,snapshot,app.settings.extras,app.game_icons,float(r.right),float(r.bottom),scale,visual_opacity);
                 if(!app.target_lock.active())draw_focus_area(draw,snapshot,focus,float(r.right),float(r.bottom),adaptive_mode(focus)?app.adaptive.target():app.camera.target,scale,app.adaptive.zone(adaptive_mode(focus)?app.adaptive.target():app.camera.target),&app.zone_outline);
+                if(hero_shots&&app.settings.vindicta_auto_select.show_area) {
+                    ActualCrosshairReference actual;
+                    draw_angular_area(draw,snapshot,app.settings.vindicta_auto_select.angle,float(r.right),float(r.bottom),app.auto_select.active()?IM_COL32(238,191,91,210):IM_COL32(96,175,248,170),scale);
+                    const auto& selected=app.auto_select.solution;ScreenPoint point;
+                    if(selected.valid&&focus_project(snapshot.matrix,selected.point,float(r.right),float(r.bottom),point))
+                        draw->AddCircle({point.x,point.y},3*scale,app.auto_select.active()?IM_COL32(238,191,91,255):IM_COL32(96,175,248,255),16,scale);
+                }
+                if(focus.focus_visuals&&focus.tracking.enabled&&focus.tracking.target_line) {
+                    Vec3 world{};bool valid=false;
+                    if(app.target_lock.active()){world=app.target_lock.solution.aim_point;valid=app.target_lock.solution.valid;}
+                    else if(adaptive_mode(focus)){world=app.adaptive.solution.aim_point;valid=app.adaptive.solution.valid;}
+                    else{world=app.camera.aim_point;valid=app.camera.point_valid;}
+                    ScreenPoint point;if(valid&&focus_project(snapshot.matrix,world,float(r.right),float(r.bottom),point)){auto center=focus_reference(float(r.right),float(r.bottom));draw->AddLine({center.x,center.y},{point.x,point.y},ImGui::ColorConvertFloat4ToU32(focus.tracking.guide_color));}
+                }
+                draw_overlay_huds(draw,snapshot,app.settings.extras,float(r.right),float(r.bottom),app.settings.transparent_frame?app.settings.frame_opacity:1.f,scale,app.settings.show_monitor_hud);
                 if(health_display_active)for(const auto& player:snapshot.players) {
-                    if(enemy_tags_active&&draw_hidden_enemy_tag(draw,snapshot,player,float(r.right),float(r.bottom),app.settings,scale))++app.hidden_tags;
+                    if(enemy_tags_active&&draw_hidden_enemy_tag(draw,snapshot,player,float(r.right),float(r.bottom),app.settings,scale,app.game_icons))++app.hidden_tags;
                     if(!enemy_teams(snapshot.local_team,player.team))continue;
                     if(app.settings.skeletons)draw_skeleton(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
                     if(app.settings.hitboxes)drawn_hitboxes+=draw_hitboxes(draw,player,snapshot.matrix,float(r.right),float(r.bottom),app.settings,scale);
@@ -1776,12 +2079,17 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
                     if(project(snapshot.matrix,app.camera.aim_point,float(r.right),float(r.bottom),target_point))
                         draw->AddCircle({target_point.x,target_point.y},9*scale,IM_COL32(255,200,70,240),24,2*scale);
                 }
-                if(app.settings.show_monitor_hud)draw_session_hud(draw,app.session_monitor,float(r.right),scale);
-                if(app.settings.show_midboss_hud)draw_midboss_hud(draw,snapshot.midboss,scale);
+                const float hud_opacity=app.settings.transparent_frame?app.settings.frame_opacity:1;
+                if(app.settings.show_monitor_hud)draw_session_hud(draw,app.session_monitor,float(r.right),scale,hud_opacity);
+                float hud_top=100;
+                if(app.settings.show_midboss_hud){draw_midboss_hud(draw,snapshot.midboss,scale,{24,hud_top},hud_opacity);hud_top+=hud_card_height+hud_card_gap;}
+                if(app.settings.extras.rift_hud){draw_rift_hud(draw,snapshot.rift,scale,{24,hud_top},hud_opacity);hud_top+=hud_card_height+hud_card_gap;}
                 if(app.settings.auto_parry.enabled) {
-                    if(app.settings.auto_parry.show_hud)draw_auto_parry_hud(draw,app.auto_parry,snapshot.parry,scale);
+                    if(app.settings.auto_parry.show_hud)draw_auto_parry_hud(draw,app.auto_parry,snapshot.parry,scale,{24,hud_top},hud_opacity);
                     if(app.settings.auto_parry.show_threat)draw_parry_threat(draw,snapshot,app.auto_parry.decision,float(r.right),float(r.bottom),scale);
                 }
+                // HUD map stays above world markers; the separate menu stays above both.
+                draw_game_minimap(draw,snapshot,app.settings.extras,app.game_icons,float(r.right),float(r.bottom),scale,visual_opacity);
                 if(!end_frame(app.bar_window)){app.quit=true;break;}
                 rendered=true;
             }
@@ -1789,23 +2097,38 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
         if(!visible&&IsWindowVisible(app.bar_window.hwnd))ShowWindow(app.bar_window.hwnd,SW_HIDE);
         if(app.show_settings&&focused) {
             if(!IsWindowVisible(app.settings_window.hwnd))app.open_settings();
-            if(GetForegroundWindow()==app.settings_window.hwnd&&GetCapture()!=app.settings_window.hwnd)SetCapture(app.settings_window.hwnd);
+            const bool preview_visible=position_preview(app);update_menu_capture(app);
             // Raising/resizing the bar window must never put it above the menu.
             if(bar_raised)SetWindowPos(app.settings_window.hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-            if(!begin_frame(app.settings_window)){app.quit=true;break;}draw_settings(app,snapshot);
-            if(!end_frame(app.settings_window)){app.quit=true;break;}
-            rendered=true;
+            if(render_due){if(!begin_frame(app.settings_window)){app.quit=true;break;}draw_settings(app,snapshot);
+                if(!end_frame(app.settings_window)){app.quit=true;break;}rendered=true;}
+            if(preview_visible&&render_due&&clock_ms()>=app.next_preview_frame) {
+                app.next_preview_frame=clock_ms()+1000./60;
+                if(!draw_model_preview(app,&snapshot)){app.preview_model.status="Preview rendering unavailable";ShowWindow(app.preview_window.hwnd,SW_HIDE);}
+            }else if(!preview_visible&&app.preview_window.hwnd&&IsWindowVisible(app.preview_window.hwnd))ShowWindow(app.preview_window.hwnd,SW_HIDE);
         }else if(IsWindowVisible(app.settings_window.hwnd)) {
             if(GetCapture()==app.settings_window.hwnd)ReleaseCapture();
             app.settings_window.dragging=false;ShowWindow(app.settings_window.hwnd,SW_HIDE);
         }
+        if((!app.show_settings||!focused)&&app.preview_window.hwnd&&IsWindowVisible(app.preview_window.hwnd)) {
+            if(GetCapture()==app.preview_window.hwnd)ReleaseCapture();ShowWindow(app.preview_window.hwnd,SW_HIDE);
+        }
+        if(rendered)previous_hitboxes=drawn_hitboxes;
         if(rendered&&(visible?app.bar_window.last_presented:app.settings_window.last_presented))++rendered_frames;
         uint64_t now=GetTickCount64();
-        if(rendered){auto work=clock_ms()-loop_start;auto present=app.bar_window.present_ms+app.settings_window.present_ms;work_sum+=work;queue_wait_sum+=queue_wait_ms;work_max=std::max(work_max,work);submit_sum+=app.bar_window.submit_ms+app.settings_window.submit_ms;present_sum+=present;present_max=std::max(present_max,present);++timing_frames;}
+        if(rendered){auto work=clock_ms()-loop_start;auto present=app.bar_window.present_ms+app.settings_window.present_ms+app.preview_window.present_ms;work_sum+=work;queue_wait_sum+=queue_wait_ms;work_max=std::max(work_max,work);submit_sum+=app.bar_window.submit_ms+app.settings_window.submit_ms+app.preview_window.submit_ms;present_sum+=present;present_max=std::max(present_max,present);++timing_frames;}
         if(now-fps_epoch>=1000){app.render_fps=double(rendered_frames)*1000/double(now-fps_epoch);rendered_frames=0;fps_epoch=now;}
         app.session_monitor.observe(snapshot,now,app.render_fps,app.target_hz,app.makcu.queue_delay_ms(),
-            focused,rendered,rendered?clock_ms()-loop_start:0.,app.bar_window.present_ms+app.settings_window.present_ms,queue_wait_ms);
+            focused,rendered,rendered?clock_ms()-loop_start:0.,app.bar_window.present_ms+app.settings_window.present_ms+app.preview_window.present_ms,queue_wait_ms);
         if(diagnostics&&now-last_report>=1000){report(snapshot,executable_directory()/L"session.json",app.bars,IsWindowVisible(app.bar_window.hwnd)!=FALSE,GetWindowLongPtrW(app.bar_window.hwnd,GWL_EXSTYLE),app.bar_window.hwnd,app.show_settings,app.target_hz,app.render_fps,drawn_hitboxes,app.hidden_tags);
+            std::ofstream rift_report(executable_directory()/L"rift.json");write_rift_data(rift_report,snapshot.rift);
+            std::ofstream preview_report(executable_directory()/L"visual-preview.json");
+            preview_report<<"{\"enabled\":"<<(app.settings.extras.visual_preview?"true":"false")<<",\"visible\":"<<(app.preview_window.hwnd&&IsWindowVisible(app.preview_window.hwnd)?"true":"false")<<",\"ready\":"<<(app.preview_model.ready()?"true":"false")<<",\"triangles\":"<<app.preview_model.triangle_count<<",\"model_renders\":"<<app.preview_model.model_renders<<",\"status\":";
+            external_json_string(preview_report,app.preview_model.status);preview_report<<"}\n";
+            std::ofstream extras_report(executable_directory()/L"external-features.json");extras_report<<"{\"tracking\":";external_json_string(extras_report,app.extended_camera.status);
+            extras_report<<",\"auto_select\":";write_auto_select_data(extras_report,app.auto_select,snapshot);
+            extras_report<<",\"data\":";write_external_data(extras_report,snapshot);extras_report<<"}\n";
+            std::ofstream select_report(executable_directory()/L"auto-select.json");write_auto_select_data(select_report,app.auto_select,snapshot);
             report_x2_lock(snapshot,focus,app.target_lock,activation,executable_directory()/L"camera-lock.json");
             std::ofstream tags_report(executable_directory()/L"enemy-tags.json");
             tags_report<<"{\"enabled\":"<<(app.settings.hidden_enemy_tags?"true":"false")<<",\"hold_only\":"<<(app.settings.health_visuals.hold_only?"true":"false")<<",\"hold_key\":"<<app.settings.health_visuals.key<<",\"health_features_active\":"<<(health_display_active?"true":"false")<<",\"hide_when_visible\":"<<(app.settings.hide_visible_enemy_tags?"true":"false")
@@ -1840,13 +2163,14 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
             if(timing_frames){std::ofstream perf(executable_directory()/L"frame-performance.json");perf<<"{\"frames\":"<<timing_frames<<",\"priority_class\":"<<GetPriorityClass(GetCurrentProcess())<<",\"composition\":"<<(app.bar_window.renderer.composition()?"true":"false")<<",\"busy_bar_presents\":"<<app.bar_window.busy_presents<<",\"busy_menu_presents\":"<<app.settings_window.busy_presents<<",\"menu_open\":"<<(app.show_settings?"true":"false")<<",\"work_ms\":"<<work_sum/timing_frames<<",\"submit_ms\":"<<submit_sum/timing_frames<<",\"present_ms\":"<<present_sum/timing_frames<<",\"queue_wait_ms\":"<<queue_wait_sum/timing_frames<<",\"wait_ms\":"<<wait_sum/timing_frames<<",\"max_work_ms\":"<<work_max<<",\"max_present_ms\":"<<present_max<<",\"reader_ms\":"<<snapshot.sample_us/1000<<"}\n";}
             work_sum=wait_sum=submit_sum=present_sum=queue_wait_sum=work_max=present_max=0;timing_frames=0;
             std::ofstream trace(executable_directory()/L"frame-trace.json");trace<<"{\"status\":\""<<escaped(app.frame_status)<<"\",\"enabled\":"<<(trace_frames?"true":"false")<<",\"error\":"<<game_frames.error()<<",\"events\":"<<game_frames.count()<<",\"delivery_delay_ms\":"<<game_frames.delay_ms()<<"}\n";last_report=now;}
-        auto wait_start=clock_ms();if(!focused||!game_frames.wait(app.target_hz))render_pacer.wait(focused?app.target_hz:20.0);if(rendered)wait_sum+=clock_ms()-wait_start;
+        auto wait_start=clock_ms();if(!focused||!game_frames.wait(app.target_hz))render_pacer.wait(focused?app.target_hz:20.0);
+        if(rendered)wait_sum+=clock_ms()-wait_start;
     }
-    app.makcu.stop();app.camera.release();app.adaptive.release();
+    app.auto_select.stop(app.makcu,"Shutdown");app.makcu.stop();app.camera.release();app.adaptive.release();app.game_icons.clear();app.preview_icons.clear();app.preview_model.reset();
     app.data_update.cancel();
-    reader.request_stop();reader.join();game_frames.stop();save(app.settings);
+    reader.request_stop();reader.join();game_frames.stop();if(app.settings.extras.auto_save)save(app.settings);
     HWND menu_handle=app.settings_window.hwnd,bar_handle=app.bar_window.hwnd;
-    app.settings_window.shutdown();app.bar_window.shutdown();CloseHandle(single);
+    app.preview_window.shutdown();app.settings_window.shutdown();app.bar_window.shutdown();CloseHandle(single);
     if(diagnostics){std::ofstream out(executable_directory()/L"shutdown.json");out<<"{\"reader_stopped\":true,\"menu_destroyed\":"<<(!IsWindow(menu_handle)?"true":"false")<<",\"bars_destroyed\":"<<(!IsWindow(bar_handle)?"true":"false")<<"}\n";}
     if(shutdown_complete)SetEvent(shutdown_complete);
     SetConsoleCtrlHandler(console_handler,FALSE);
@@ -1855,9 +2179,107 @@ int run(bool diagnostics,bool settings_at_start,bool shutdown_test=false,bool tr
 }
 }
 int main(int argc,char** argv) {
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--auto-select-sandbox-check") {
+        const std::filesystem::path result=argv[i+1];std::filesystem::path profile;
+        bool windows_only=false;
+        for(int j=1;j<argc;++j){if(std::string(argv[j])=="--reader-profile"&&j+1<argc)profile=argv[j+1];if(std::string(argv[j])=="--windows-input")windows_only=true;}
+        overlay::GameReader reader(profile);overlay::ReadOptions options;options.hitboxes=options.enemy_tags=options.helpers=options.assassinate=options.minions=true;options.midboss=false;
+        auto s=reader.sample(options);for(int warm=0;warm<8&&!s.assassinate.valid;++warm){Sleep(25);s=reader.sample(options);}
+        struct WindowSearch {DWORD pid;HWND window;};WindowSearch search{s.pid,nullptr};
+        EnumWindows([](HWND window,LPARAM param)->BOOL {auto* state=reinterpret_cast<WindowSearch*>(param);DWORD pid{};GetWindowThreadProcessId(window,&pid);
+            if(pid==state->pid&&IsWindowVisible(window)&&!GetWindow(window,GW_OWNER)){state->window=window;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&search));
+        std::ofstream out(result);
+        if(!s.practice||s.replay||!s.local_alive||!overlay::vindicta(s.hero)||!s.assassinate.valid||!search.window) {
+            out<<"{\"passed\":false,\"input_submitted\":false,\"reason\":\"Validated Vindicta sandbox and damage data required\"}\n";return 2;
+        }
+        if(windows_only)SetEnvironmentVariableW(L"MAKCU_PORT",L"disabled");
+        overlay::MakcuInput input;input.start();overlay::VindictaAutoSelect controller;overlay::VindictaAutoSelectSettings settings;settings.enabled=true;settings.angle=25;settings.speed=100;
+        auto discovery=GetTickCount64()+2000;while(!windows_only&&!input.hardware_ready()&&GetTickCount64()<discovery)Sleep(20);
+        const bool initially_scoped=s.hero.sniper_scoped;
+        const std::string backend=input.backend();auto until=GetTickCount64()+12000;bool first=true;std::string previous;uint64_t last_shots{};
+        out<<"{\"sandbox_only\":true,\"backend\":\""<<backend<<"\",\"events\":[";
+        do {
+            s=reader.sample(options);
+            const bool allowed=s.practice&&!s.replay&&GetForegroundWindow()==search.window;
+            controller.tick(input,s,settings,search.window,allowed,false);
+            const auto state=controller.status+std::to_string(controller.shots)+std::to_string(int(controller.phase));
+            if(state!=previous){if(!first)out<<',';first=false;overlay::write_auto_select_data(out,controller,s);previous=state;}
+            if(controller.shots&&!last_shots){last_shots=controller.shots;until=std::min(until,GetTickCount64()+2000);}
+            if(last_shots&&!controller.active())break;
+            if(!allowed)break;
+            Sleep(4);
+        }while(GetTickCount64()<until);
+        const bool scope_preserved=initially_scoped?s.hero.sniper_scoped:!s.hero.sniper_scoped&&controller.scope_exits>0;
+        const bool passed=controller.shots>0&&!controller.active()&&scope_preserved;const auto shots=controller.shots,moves=controller.moves;const auto status=controller.status;
+        controller.stop(input,"Sandbox check complete");input.stop();
+        out<<"],\"passed\":"<<(passed?"true":"false")<<",\"confirmed_shots\":"<<shots<<",\"movement_commands\":"<<moves<<",\"status\":";overlay::external_json_string(out,status);
+        out<<",\"scope_preserved\":"<<(scope_preserved?"true":"false")<<",\"program_keys_released\":"<<(!input.calibration_cleanup()?"true":"false")<<"}\n";
+        std::cout<<status<<" / "<<shots<<" confirmed shots / "<<backend<<" / keys released\n";return passed?0:2;
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--auto-select-probe") {
+        const std::filesystem::path result=argv[i+1];std::filesystem::path profile;unsigned duration=1500;
+        for(int j=1;j+1<argc;++j){if(std::string(argv[j])=="--reader-profile")profile=argv[j+1];if(std::string(argv[j])=="--probe-ms")try{duration=std::clamp(unsigned(std::stoul(argv[j+1])),200u,30000u);}catch(...){return 2;}}
+        // Read-only: this mode never creates an input worker or loads preferences.
+        overlay::GameReader reader(profile);overlay::Snapshot s;unsigned samples{},valid{};std::ofstream out(result);
+        out<<"{\"read_only\":true,\"input_submitted\":false,\"events\":[";bool first=true;uint64_t next{};overlay::VindictaAutoSelect monitor;
+        const auto until=GetTickCount64()+duration;
+        do {
+            overlay::ReadOptions options;options.hitboxes=options.enemy_tags=options.helpers=options.assassinate=options.minions=true;options.midboss=false;
+            s=reader.sample(options);++samples;valid+=s.assassinate.valid;
+            if(GetTickCount64()>=next) {
+                next=GetTickCount64()+200;monitor.solution={};monitor.candidates=0;monitor.status=s.assassinate.status;
+                for(const auto& p:s.players){if(overlay::assassinate_health_eligible(p.health,p.maximum)&&overlay::enemy_teams(s.local_team,p.team))++monitor.candidates;
+                    auto candidate=overlay::auto_select_solution(s,p,25,true);if(candidate.valid&&overlay::auto_select_better(candidate,monitor.solution))monitor.solution=std::move(candidate);}
+                if(!first)out<<',';first=false;overlay::write_auto_select_data(out,monitor,s);
+            }
+            Sleep(4);
+        }while(GetTickCount64()<until);
+        out<<"],\"samples\":"<<samples<<",\"valid_damage_samples\":"<<valid<<",\"practice\":"<<(s.practice?"true":"false")<<",\"map\":";overlay::external_json_string(out,s.map_name);
+        out<<",\"players\":[";first=true;for(const auto& p:s.players){if(!first)out<<',';first=false;out<<"{\"hero\":";overlay::external_json_string(out,p.hero_name);
+            out<<",\"health\":"<<p.health<<",\"maximum\":"<<p.maximum<<",\"hitboxes\":"<<p.hitboxes.size()<<",\"defense_fields\":"<<p.assassinate_defense.known<<",\"defense_omissions\":";overlay::external_json_string(out,p.assassinate_defense.omissions);out<<'}';}out<<"]}\n";
+        std::cout<<s.assassinate.status<<" / "<<valid<<'/'<<samples<<" valid damage samples / no input submitted\n";
+        return out.good()&&valid?0:2;
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--rift-probe") {
+        std::filesystem::path result=argv[i+1],profile;unsigned duration=1000;
+        for(int j=1;j+1<argc;++j){if(std::string(argv[j])=="--reader-profile")profile=argv[j+1];if(std::string(argv[j])=="--probe-ms")try{duration=std::clamp(unsigned(std::stoul(argv[j+1])),200u,60000u);}catch(...){return 2;}}
+        // Bounded, read-only event observation. No window, settings or input owner.
+        overlay::GameReader reader(profile);overlay::ReadOptions options;options.rift=true;std::ofstream out(result);
+        auto until=GetTickCount64()+duration;bool valid{};
+        do{auto snapshot=reader.sample(options);valid|=snapshot.rift.valid;overlay::write_rift_data(out,snapshot.rift);out.flush();Sleep(100);}while(GetTickCount64()<until);
+        return valid&&out.good()?0:2;
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--model-preview") {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);return overlay::model_previews(argv[i+1]);
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--world-preview") {
+        std::filesystem::path profile;for(int j=1;j+1<argc;++j)if(std::string(argv[j])=="--reader-profile")profile=argv[j+1];
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);return overlay::world_previews(argv[i+1],profile);
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--external-probe") {
+        std::filesystem::path result=argv[i+1],profile;unsigned duration=1000;
+        for(int j=1;j+1<argc;++j){if(std::string(argv[j])=="--reader-profile")profile=argv[j+1];if(std::string(argv[j])=="--probe-ms")try{duration=std::clamp(unsigned(std::stoul(argv[j+1])),200u,60000u);}catch(...){return 2;}}
+        // Deliberately no input worker, overlay window, config load or helper inputs.
+        overlay::GameReader game(profile);overlay::Snapshot snapshot;std::ofstream out(result);out<<"{\"read_only\":true,\"events\":[";bool first=true;unsigned samples{},scope_ready{},puddle_samples{};
+        std::string previous;auto until=GetTickCount64()+duration;
+        do {
+            overlay::ReadOptions options;options.skeletons=options.minions=options.orbs=options.hitboxes=options.adaptive_motion=options.parry=options.spell_parry=options.metadata=options.decorations=options.observers=options.helpers=options.joints=options.puddle=true;
+            options.world=options.minimap=options.rift=true;
+            snapshot=game.sample(options);++samples;scope_ready+=snapshot.helpers.sniper_ready;puddle_samples+=unsigned(snapshot.puddles.size());
+            std::ostringstream state;state<<snapshot.helpers.sniper_status<<'/'<<snapshot.players.size()<<'/'<<snapshot.puddles.size();
+            if(state.str()!=previous){if(!first)out<<',';first=false;overlay::write_external_data(out,snapshot);previous=state.str();}Sleep(8);
+        }while(GetTickCount64()<until);
+        out<<"],\"samples\":"<<samples<<",\"scope_ready\":"<<scope_ready<<",\"puddle_samples\":"<<puddle_samples<<",\"rift\":";overlay::write_rift_data(out,snapshot.rift);out<<",\"last\":";overlay::write_external_data(out,snapshot);
+        out<<",\"model_bones\":[";first=true;for(auto& [model,bones]:game.diagnostic_bones()){if(!first)out<<',';first=false;out<<"{\"model\":";overlay::external_json_string(out,model);out<<",\"names\":[";bool first_bone=true;for(auto& bone:bones){if(!first_bone)out<<',';first_bone=false;overlay::external_json_string(out,bone);}out<<"]}";}out<<"]}\n";
+        std::cout<<snapshot.status<<" / "<<snapshot.players.size()<<" players / readers ready\n";return out.good()&&snapshot.projection.valid&&!snapshot.players.empty()?0:2;
+    }
     for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--menu-preview") {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         return overlay::menu_previews(std::filesystem::path(argv[i+1]));
+    }
+    for(int i=1;i+1<argc;++i)if(std::string(argv[i])=="--vindicta-menu-preview") {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        return overlay::menu_previews(std::filesystem::path(argv[i+1]),true);
     }
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--parry-probe") {
         std::filesystem::path profile,result=overlay::executable_directory()/L"parry-probe.json";unsigned duration=8000;

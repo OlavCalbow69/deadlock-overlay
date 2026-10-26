@@ -44,7 +44,7 @@ public:
         if(!std::isfinite(result.error.distance)||(!full_sphere&&result.error.distance>=90)){clear();return result;}
         if(full_sphere) {
             if(!spherical_screen_error(matrix,point,width,height,result.error,result.remaining)){clear();return result;}
-        }else result.remaining={projected.x-width*.5f,projected.y-height*.5f};
+        }else result.remaining={projected.x-focus_reference(width,height).x,projected.y-focus_reference(width,height).y};
         const float gain=1-std::exp(-dt/(adaptive_response_ms(speed)/1000));
         float vx=result.error.x*gain/dt,vy=result.error.y*gain/dt;
         const float rate=std::hypot(vx,vy);if(rate>response.max_rate){vx*=response.max_rate/rate;vy*=response.max_rate/rate;}

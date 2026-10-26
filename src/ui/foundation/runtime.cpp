@@ -8,6 +8,7 @@ namespace solace::ui_runtime
 {
 namespace
 {
+std::unordered_map<ImGuiContext*,int>& collection_frames(){static std::unordered_map<ImGuiContext*,int> frames;return frames;}
 std::vector<detail::animation_bucket_base*>& animation_buckets()
 {
     static std::vector<detail::animation_bucket_base*> buckets;
@@ -35,7 +36,7 @@ void collect_animation_states(int max_unused_frames)
     if (!ImGui::GetCurrentContext() || max_unused_frames < 0)
         return;
 
-    static int last_collection_frame = -1;
+    auto context=ImGui::GetCurrentContext();auto [entry,inserted]=collection_frames().try_emplace(context,-1);auto& last_collection_frame=entry->second;
     const int current_frame = ImGui::GetFrameCount();
     if (last_collection_frame >= 0 && current_frame >= last_collection_frame &&
         current_frame - last_collection_frame < 120)
@@ -43,11 +44,12 @@ void collect_animation_states(int max_unused_frames)
 
     last_collection_frame = current_frame;
     for (detail::animation_bucket_base* bucket : animation_buckets())
-        bucket->collect(current_frame, max_unused_frames);
+        bucket->collect(context,current_frame, max_unused_frames);
 }
 
 void clear_animation_states() noexcept
 {
+    collection_frames().clear();
     for (detail::animation_bucket_base* bucket : animation_buckets())
         bucket->clear();
 }

@@ -108,6 +108,19 @@ inline ParryDecision find_parry_threat(const Snapshot& snapshot,const AutoParryS
             consider({ParryThreatKind::SpellProjectile,projectile.handle,0,(uint64_t(projectile.handle)<<32)^0x5350454c,t*1000,origin,point,true,projectile.name});
         }
     }
+    if(settings.puddle)for(const auto& p:snapshot.puddles) {
+        const float wait=p.impact-state.game_time-age;
+        if(!enemy_teams(snapshot.local_team,p.team)||wait<-.03f||wait>horizon)continue;
+        float length=std::sqrt(dot(p.normal,p.normal));if(length<.9f||length>1.1f)continue;auto normal=mul(p.normal,1/length);
+        for(const auto& box:state.local_hitboxes) {
+            auto center=add(hitbox_center(box),local_shift);float along=dot(sub(center,p.position),normal);
+            auto nearest=add(parry_geometry::nearest(box,sub(add(p.position,mul(normal,std::clamp(along,0.f,p.reach))),local_shift)),local_shift);
+            auto delta=sub(nearest,p.position);float axis=dot(delta,normal),radial=dot(delta,delta)-axis*axis;
+            if(axis<0||axis>p.reach||radial>p.radius*p.radius||!snapshot.visibility->clear(p.position,nearest))continue;
+            uint64_t key=(uint64_t(p.handle)<<32)^std::bit_cast<uint32_t>(p.impact);
+            consider({ParryThreatKind::PuddlePunch,p.handle,p.handle,key,std::max(0.f,wait*1000),p.position,nearest,true,"Viscous Puddle Punch"});break;
+        }
+    }
     return best;
 }
 class AutoParry {
@@ -150,7 +163,7 @@ public:
         for(auto it=submitted_.begin();it!=submitted_.end();)it=now-it->second>5000?submitted_.erase(it):std::next(it);
         for(auto it=attacker_until_.begin();it!=attacker_until_.end();)it=now>=it->second?attacker_until_.erase(it):std::next(it);
         decision=find_parry_threat(snapshot,settings,now);
-        if(!decision.valid){input.cancel_parry();status=settings.melee&&snapshot.parry.replicated_readers&&!snapshot.parry.melee_definition_valid?snapshot.parry.melee_definition_status
+        if(!decision.valid){input.cancel_parry();status=settings.puddle&&!snapshot.puddle_capable?"Puddle data unavailable / other checks continue":settings.melee&&snapshot.parry.replicated_readers&&!snapshot.parry.melee_definition_valid?snapshot.parry.melee_definition_status
             :settings.counterspell&&!snapshot.parry.counterspell_owned?"No incoming melee / Counterspell not owned":snapshot.parry.unavailable_melee?"No incoming threat / some melee data unavailable":"Watching for an incoming attack";return;}
         if((decision.kind==ParryThreatKind::SpellProjectile?snapshot.parry.counterspell_active:snapshot.parry.active)) {
             input.cancel_parry();status="Current parry window already protects this threat";return;

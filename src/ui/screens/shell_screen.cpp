@@ -96,6 +96,8 @@ shell_page overlay_page(route destination)
     case route::tasks: return shell_page::test;
     case route::presets: return shell_page::auto_parry;
     case route::automation: return shell_page::auto_click;
+    case route::notes: return shell_page::hud;
+    case route::dashboard:return shell_page::configurations;
     default: return shell_page::health;
     }
 }
@@ -109,8 +111,10 @@ nav_item overlay_item(route destination)
     case shell_page::connection: return {"Connection", icons::id::workflow, nullptr, {}, 0};
     case shell_page::test: return {"Diagnostics", icons::id::code, nullptr, {}, 0};
     case shell_page::auto_parry: return {"Auto Parry", icons::id::lock, nullptr, {}, 0};
+    case shell_page::configurations:return {"Configurations",icons::id::notebook_tabs,nullptr,{},0};
     case shell_page::auto_click: return {"Auto Click", icons::id::target, nullptr, {}, 0};
-    default: return {"Health bars", icons::id::eye, nullptr, {}, 0};
+    case shell_page::hud: return {"HUDs", icons::id::layout_grid, nullptr, {}, 0};
+    default: return {"Visuals", icons::id::eye, nullptr, {}, 0};
     }
 }
 
@@ -275,6 +279,8 @@ bool menu_screen(float alpha, const shell_extension* extension)
         case shell_page::test: s.active = route::tasks; break;
         case shell_page::auto_parry: s.active = route::presets; break;
         case shell_page::auto_click: s.active = route::automation; break;
+        case shell_page::configurations:s.active=route::dashboard;break;
+        case shell_page::hud: s.active=route::notes; break;
         }
     }
     const float dt = ImGui::GetIO().DeltaTime;
@@ -394,13 +400,14 @@ bool menu_screen(float alpha, const shell_extension* extension)
 
         dl->PushClipRect(nav_box.Min, nav_box.Max, true);
 
-        constexpr int overlay_order[]={1,2,3,8,4,5,6,0,7,9};
+        constexpr int overlay_order[]={1,2,3,7,8,4,5,9,6,0};
         for (int item_index = 0; item_index < k_item_count; item_index++)
         {
             const int i=extension?overlay_order[item_index]:item_index;
             if (extension && i != route_index(route::assistant) && i != route_index(route::messages)
                 && i != route_index(route::settings) && i != route_index(route::patches)
-                && i != route_index(route::tasks) && i != route_index(route::presets) && i != route_index(route::automation))
+                && i != route_index(route::tasks) && i != route_index(route::presets) && i != route_index(route::automation)
+                && i != route_index(route::dashboard) && i != route_index(route::notes))
                 continue;
             nav_item item = k_items[i];
             if (extension)

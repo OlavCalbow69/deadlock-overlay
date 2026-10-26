@@ -7,6 +7,8 @@
 #include <cstring>
 #include <math.h>
 #include <vector>
+#include <memory>
+#include <unordered_map>
 
 namespace solace::glass
 {
@@ -292,7 +294,6 @@ struct render_command
     ID3D11ShaderResourceView* backdrop = nullptr;
 };
 
-dx11::pixel_shader_pass g_shader;
 
 struct trail
 {
@@ -306,11 +307,15 @@ struct trail
     int frame = -1;
 };
 
-trail& state()
-{
-    static trail t;
-    return t;
+struct cursor_state { dx11::pixel_shader_pass shader; trail path; };
+std::unordered_map<ImGuiContext*,std::unique_ptr<cursor_state>> cursors;
+cursor_state& runtime() {
+    auto& value=cursors[ImGui::GetCurrentContext()];
+    if(!value)value=std::make_unique<cursor_state>();
+    return *value;
 }
+trail& state() {return runtime().path;}
+dx11::pixel_shader_pass& shader() {return runtime().shader;}
 
 void callback(const ImDrawList*, const ImDrawCmd* cmd)
 {
@@ -320,11 +325,11 @@ void callback(const ImDrawList*, const ImDrawCmd* cmd)
 
     render_command command{};
     std::memcpy(&command, cmd->UserCallbackData, sizeof(command));
-    if (!g_shader.upload_constants(&command.values, sizeof(command.values)))
+    if (!shader().upload_constants(&command.values, sizeof(command.values)))
         return;
 
     ID3D11ShaderResourceView* view = command.backdrop;
-    g_shader.bind(&view, 1);
+    shader().bind(&view, 1);
 }
 
 void set_colour(float out[4], ImU32 col)
@@ -351,24 +356,23 @@ bool& enabled()
 
 bool cursor_live()
 {
-    return g_shader.ready() && state().seeded && state().presence > 0.05f;
+    return shader().ready() && state().seeded && state().presence > 0.05f;
 }
 
 bool cursor_init(ID3D11Device* device, ID3D11DeviceContext* context)
 {
-    return g_shader.initialize(device, context, k_pixel_shader, sizeof(k_pixel_shader) - 1,
+    return shader().initialize(device, context, k_pixel_shader, sizeof(k_pixel_shader) - 1,
                                "glass cursor shader", sizeof(constants), true);
 }
 
 void cursor_shutdown()
 {
-    g_shader.reset();
-    state() = trail();
+    cursors.erase(ImGui::GetCurrentContext());
 }
 
 void cursor(ImDrawList* dl, const ImRect& viewport, const cursor_options& o)
 {
-    if (!g_shader.ready() || !dl || !enabled() || o.opacity <= 0.001f)
+    if (!shader().ready() || !dl || !enabled() || o.opacity <= 0.001f)
         return;
 
     ImGuiIO& io = ImGui::GetIO();

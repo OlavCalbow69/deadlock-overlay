@@ -18,7 +18,7 @@ inline AdaptivePoint x2_lock_point(const Snapshot& s,const FocusTarget& target,c
         if(point.valid)return point;
     }else {
         Vec3 world;float line{};bool inside{};
-        if(focus_point(s.matrix,target,settings.focus_bone,settings.free_focus,2,2,{1,1},lead,world,line,settings.free_focus_mode,nullptr,&inside)&&allowed(world)) {
+        if(focus_point(s.matrix,target,settings.focus_bone,settings.free_focus,2,2,focus_reference(2,2),lead,world,line,settings.free_focus_mode,nullptr,&inside)&&allowed(world)) {
             const auto error=direction_error(basis,sub(world,basis.origin));
             return {world,error,0,AnatomicalRegion::Unknown,-1,true,inside,true,error.distance};
         }
@@ -72,7 +72,7 @@ inline AdaptiveFocusSolution build_x2_lock_solution(const Snapshot& s,const Focu
     if(prediction&&motion.velocity_valid&&finite(motion.velocity)&&age>=0&&age<=50) {
         const bool automatic=adaptive||settings.auto_speed;
         const float speed=automatic?s.weapon.speed:settings.projectile_speed;
-        const float inheritance=sniper?0:automatic?s.weapon.inheritance:settings.inherit_velocity?1.f:0.f;
+        const float inheritance=(sniper||(settings.tracking.enabled&&settings.tracking.fixed_lead))?0:automatic?s.weapon.inheritance:settings.inherit_velocity?1.f:0.f;
         const bool projectile_valid=sniper||!automatic||s.weapon.valid;
         const bool local_valid=inheritance==0||s.local_motion.velocity_valid||s.local_velocity_valid;
         if(projectile_valid&&local_valid) {
@@ -84,7 +84,7 @@ inline AdaptiveFocusSolution build_x2_lock_solution(const Snapshot& s,const Focu
             for(int iteration=0;iteration<3;++iteration) {
                 auto next=x2_lock_point(s,target,settings,lead,previous_id);
                 if(!next.valid){solved=false;blocked=true;break;}point=next;flight=0;
-                if(!sniper&&!intercept(basis.origin,add(sub(point.world,lead),age_lead),relative,speed,flight)){solved=false;break;}
+                if(!sniper){if(settings.tracking.enabled&&settings.tracking.fixed_lead)flight=settings.tracking.lead;else if(!intercept(basis.origin,add(sub(point.world,lead),age_lead),relative,speed,flight)){solved=false;break;}}
                 const auto next_lead=add(age_lead,mul(relative,flight));
                 if(dot(sub(next_lead,lead),sub(next_lead,lead))<.001f){lead=next_lead;break;}lead=next_lead;
             }
@@ -115,7 +115,13 @@ public:
     bool active()const{return active_;}
     State state()const{return state_;}
     uint32_t target()const{return state_==State::Locked?target_:0;}
-    void buttons(bool held,bool enabled) {
+    void buttons(bool held,bool enabled,bool owned=false) {
+        if(owned) {
+            // Suppression makes Windows input ambiguous. Consume this hold until
+            // an unowned release, rather than treating it as a new physical edge.
+            down_=true;active_=enabled||active_;
+            lose("Program input / release X2 to lock");return;
+        }
         const bool pressed=held&&!down_;down_=held;
         // A scope/profile change cannot hand a consumed X2 hold to another controller.
         active_=held&&(enabled||active_);
@@ -170,12 +176,13 @@ public:
     void invalidate(const char* reason){session_.lose(reason);solution={};clear_motion();last_sample_=-1;status=session_.status;}
     void update(MakcuInput& input,const Snapshot& s,HWND game,const CameraFocusSettings& settings,bool menu,bool sniper,
         bool enabled,double now,const FocusActivation& activation,bool x2_down) {
-        const bool was_active=active();session_.buttons(x2_down,settings.x2_target_lock);
+        const bool was_active=active(),owned_x2=key_program_owned(VK_XBUTTON2);
+        session_.buttons(x2_down,settings.x2_target_lock,owned_x2);
         if(!active()) {
             if(was_active){input.cancel_motion();solution={};clear_motion();last_sample_=-1;}
             status=session_.status;return;
         }
-        const char* gate=!enabled?"Focus disabled / release X2":menu?"Menu open / release X2":!input.ready()?"Input unavailable / release X2"
+        const char* gate=owned_x2?"Program input / release X2 to lock":!enabled?"Focus disabled / release X2":menu?"Menu open / release X2":!input.ready()?"Input unavailable / release X2"
             :!game||IsIconic(game)||GetForegroundWindow()!=game?"Game not focused / release X2"
             :!s.pid||!s.time||GetTickCount64()<s.time||GetTickCount64()-s.time>50||!s.camera_valid||!s.projection.valid
                 ||now<s.projection_ms||now-s.projection_ms>50?"Stale camera data / release X2":nullptr;
@@ -209,6 +216,7 @@ public:
         }
         solution.requested_x=x;solution.requested_y=y;status="X2 target locked / 360 degrees";
         if(!x&&!y)return;
+        tracking_motion.error=std::hypot(solution.pixel_error.x,solution.pixel_error.y);
         if(input.move(game,x,y,FocusHoldButton::X2))++moves;
         else {++input_failures;invalidate("Input failed / release X2 to select again");}
     }

@@ -3,6 +3,7 @@
 #include "focus_input.h"
 #include "focus_hitboxes.h"
 #include "adaptive_settings.h"
+#include "tracking_settings.h"
 #include <array>
 #include <ostream>
 #include <sstream>
@@ -10,6 +11,7 @@
 
 namespace overlay {
 struct CameraFocusSettings {
+    TrackingSettings tracking;
     bool exclude_teammates=false,visible_only=true;
     bool focus_players=true,focus_minions=false,focus_orbs=false;
     bool strict_enemy_players=false; // Runtime policy for Assassinate; not a user setting.
@@ -39,6 +41,7 @@ inline CameraFocusSettings assassinate_controls(CameraFocusSettings settings={})
     restrict_assassinate_targets(settings);return settings;
 }
 inline void sanitize_camera_settings(CameraFocusSettings& s) {
+    sanitize_tracking(s.tracking);
     // Stored value 1 was V2. Preserve its full-body free movement through Adaptive.
     if(s.free_focus_mode==FreeMovementMode::Hitboxes){s.free_focus_mode=FreeMovementMode::Adaptive;s.adaptive.region=AdaptiveRegion::WholeBody;}
     s.focus_speed=std::isfinite(s.focus_speed)?std::clamp(s.focus_speed,1.f,120.f):12.f;
@@ -50,6 +53,7 @@ inline void sanitize_camera_settings(CameraFocusSettings& s) {
     s.adaptive_speed_x2=std::isfinite(s.adaptive_speed_x2)&&s.adaptive_speed_x2>0?std::clamp(s.adaptive_speed_x2,1.f,140.f):std::min(140.f,s.adaptive.speed+27.2f);
 }
 inline bool read_camera_setting(CameraFocusSettings& s,std::string_view key,std::istringstream& data) {
+    if(read_tracking_setting(s.tracking,key,data))return true;
     bool* flag=key=="exclude_teammates"?&s.exclude_teammates:key=="visible_only"?&s.visible_only
         :key=="focus_players"?&s.focus_players:key=="focus_minions"?&s.focus_minions:key=="focus_orbs"?&s.focus_orbs
         :key=="replay_focus"?&s.replay_focus:key=="debug_focus"?&s.debug_focus:key=="focus_visuals"?&s.focus_visuals
@@ -60,13 +64,14 @@ inline bool read_camera_setting(CameraFocusSettings& s,std::string_view key,std:
     if(key=="focus_bone"){int n{};if(data>>n)s.focus_bone=std::clamp(n,0,2);return true;}
     if(key=="free_focus_mode"){int n{};if(data>>n)s.free_focus_mode=static_cast<FreeMovementMode>(std::clamp(n,0,2));return true;}
     if(key=="adaptive_region"){int n{};if(data>>n)s.adaptive.region=selectable_adaptive_region(n);return true;}
-    if(key=="adaptive_area_mode"){int n{};if(data>>n)s.adaptive.area=static_cast<AdaptiveAreaMode>(std::clamp(n,0,1));return true;}
+    if(key=="adaptive_area_mode"){int n{};if(data>>n)s.adaptive.area=static_cast<AdaptiveAreaMode>(std::clamp(n,0,3));return true;}
     if(key=="adaptive_show_zone"){int n{};if(data>>n)s.adaptive.show_target_zone=n!=0;return true;}
     if(key=="adaptive_prediction"||key=="adaptive_show_area"){int n{};if(data>>n)(key=="adaptive_prediction"?s.adaptive.prediction:s.adaptive.show_area)=n!=0;return true;}
     float* adaptive_value=key=="adaptive_radius"?&s.adaptive.radius_degrees:key=="adaptive_speed"?&s.adaptive.speed
         :key=="adaptive_max_rate"?&s.adaptive.max_rate:key=="adaptive_max_acceleration"?&s.adaptive.max_acceleration
         :key=="adaptive_padding_percent"?&s.adaptive.padding_percent:nullptr;
     if(adaptive_value){float n{};if(data>>n&&std::isfinite(n))*adaptive_value=n;return true;}
+    if(key=="adaptive_pixel_radius"){float n{};if(data>>n&&std::isfinite(n))s.adaptive.pixel_radius=std::clamp(n,20.f,400.f);return true;}
     if(key=="focus_hold_button"){int n{};if(data>>n)s.focus_hold_button=static_cast<FocusHoldButton>(std::clamp(n,0,3));return true;}
     float* value=key=="focus_speed"?&s.focus_speed:key=="focus_speed_x2"?&s.focus_speed_x2:key=="adaptive_speed_x2"?&s.adaptive_speed_x2
         :key=="projectile_speed"?&s.projectile_speed:key=="click_interval_ms"?&s.click_interval_ms:nullptr;
@@ -74,6 +79,7 @@ inline bool read_camera_setting(CameraFocusSettings& s,std::string_view key,std:
     return false;
 }
 inline void write_camera_settings(std::ostream& out,const CameraFocusSettings& s,std::string_view prefix={}) {
+    write_tracking_settings(out,s.tracking,prefix);
     auto write=[&](const char* key,const auto& value){out<<prefix<<key<<'='<<value<<'\n';};
     write("exclude_teammates",s.exclude_teammates);write("visible_only",s.visible_only);
     write("focus_players",s.focus_players);write("focus_minions",s.focus_minions);write("focus_orbs",s.focus_orbs);
@@ -87,7 +93,7 @@ inline void write_camera_settings(std::ostream& out,const CameraFocusSettings& s
     write("auto_click",s.auto_click);write("auto_click_orbs_only",s.auto_click_orbs_only);write("click_interval_ms",s.click_interval_ms);
     write("auto_click_orbs_hold_side",s.auto_click_orbs_hold_side);
     write("focus_area_version",2);
-    write("adaptive_region",int(s.free_focus_mode==FreeMovementMode::Hitboxes?AdaptiveRegion::WholeBody:selectable_adaptive_region(int(s.adaptive.region))));write("adaptive_radius",s.adaptive.radius_degrees);write("adaptive_speed",s.adaptive.speed);
+    write("adaptive_pixel_radius",s.adaptive.pixel_radius);write("adaptive_region",int(s.free_focus_mode==FreeMovementMode::Hitboxes?AdaptiveRegion::WholeBody:selectable_adaptive_region(int(s.adaptive.region))));write("adaptive_radius",s.adaptive.radius_degrees);write("adaptive_speed",s.adaptive.speed);
     write("adaptive_max_rate",s.adaptive.max_rate);write("adaptive_max_acceleration",s.adaptive.max_acceleration);
     write("adaptive_prediction",s.adaptive.prediction);write("adaptive_show_area",s.adaptive.show_area);
     write("adaptive_area_mode",int(s.adaptive.area));write("adaptive_padding_percent",s.adaptive.padding_percent);

@@ -11,6 +11,10 @@
 *.log
 *.exe
 *.dll
+*.exe.previous
+*.exe.new
+*.dll.previous
+*.dll.new
 *.user
 *.aps
 .vs/

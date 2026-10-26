@@ -39,6 +39,19 @@ struct ReaderProfile {
 #undef PROFILE_ADDRESS
 #undef PROFILE_VALUE
     } layout;
+    struct FeatureFields {
+#define FEATURE_FIELD(key,cls,field,width) uint32_t key{};
+#define FEATURE_PRIVATE(key) uint32_t key{};
+#define FEATURE_SIZE(key,cls) uint32_t key{};
+#define FEATURE_ENUM(key,name) uint32_t key{};
+#define FEATURE_GLOBAL(key,name) uint32_t key{};
+#include "reader_feature_fields.inc"
+#undef FEATURE_FIELD
+#undef FEATURE_PRIVATE
+#undef FEATURE_SIZE
+#undef FEATURE_ENUM
+#undef FEATURE_GLOBAL
+    } features;
     bool automatic{};
     std::string source{"built_in_6774"};
     static constexpr const char* client_hash="e2bafed8ebdfd239d506b4f59b24a09719f945c6a63f69766171349b886603d4";
@@ -78,6 +91,17 @@ struct ReaderProfile {
 #undef PROFILE_FIELD
 #undef PROFILE_ADDRESS
 #undef PROFILE_VALUE
+#define FEATURE_FIELD(key,cls,field,width) if(values.contains("feature." #key)&&!number("feature." #key,next.features.key,0x20000))return fail("Invalid feature field: " #key);
+#define FEATURE_PRIVATE(key) FEATURE_FIELD(key,"","",4)
+#define FEATURE_SIZE(key,cls) FEATURE_FIELD(key,"","",4)
+#define FEATURE_ENUM(key,name) FEATURE_FIELD(key,"","",4)
+#define FEATURE_GLOBAL(key,name) if(values.contains("feature." #key)&&!number("feature." #key,next.features.key,client_size))return fail("Invalid feature global: " #key);
+#include "reader_feature_fields.inc"
+#undef FEATURE_FIELD
+#undef FEATURE_PRIVATE
+#undef FEATURE_SIZE
+#undef FEATURE_ENUM
+#undef FEATURE_GLOBAL
         const auto& private_values=next.layout;
         if(!private_values.bullet_speed_index||private_values.bullet_speed_index>=1024||!private_values.bullet_override_index||private_values.bullet_override_index>=1024
             ||private_values.bullet_speed_index==private_values.bullet_override_index||private_values.modifier_cache>=0x10000||(private_values.modifier_cache&15)

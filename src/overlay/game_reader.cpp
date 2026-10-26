@@ -58,12 +58,16 @@ std::string GameReader::text(uintptr_t address, size_t limit) const {
     return {};
 }
 void GameReader::detach() {
+    rift_teams_.clear();rift_history_.reset();rift_cache_={};next_rift_=0;map_lanes_.reset();
+    world_entities_.clear();lane_entities_.clear();breakables_.reset();world_catalog_={};world_catalog_attempted_=false;next_world_catalog_=0;
+    puddle_cache_.clear();
+    observer_cache_.clear();next_observers_=0;
     replicated_melee_.clear();melee_template_={};
     if (process_) CloseHandle(process_);
     process_=nullptr; pid_=0; base_=entity_slot_=matrix_address_=engine_base_=world_renderer_base_=0;
     types_.clear(); models_.clear(); controllers_.clear();extras_.clear();midbosses_.clear();midboss_cache_={};next_midboss_=0;next_enumerate_=0;
     spell_projectiles_.clear();unsupported_projectiles_=0;counterspell_watcher_=0;next_counterspell_scan_=0;
-    hero_names_.clear();heroes_.clear();enemy_hero_labels_.clear();ability_handles_.clear();ability_pawn_=0;sniper_handle_=UINT32_MAX;
+    hero_names_.clear();heroes_.clear();enemy_hero_labels_.clear();ability_handles_.clear();ability_pawn_=0;sniper_handle_=UINT32_MAX;assassinate_template_={};
     slide_abilities_.clear();slide_pawn_=0;slide_handle_=UINT32_MAX;
     velocities_.clear();adaptive_motions_.clear();local_motion_={};local_handle_=0;
     visibility_.reset();visibility_map_.clear();next_visibility_load_=0;
@@ -225,7 +229,7 @@ std::string GameReader::loaded_arena(uint64_t now) {
 }
 bool GameReader::enumerate(uintptr_t system) {
     std::array<uintptr_t,64> chunks{}; if (!read(system+0x10,chunks)) return false;
-    controllers_.clear();extras_.clear();midbosses_.clear();spell_projectiles_.clear();unsupported_projectiles_=0; std::vector<unsigned char> block(512*0x70);
+    controllers_.clear();extras_.clear();world_entities_.clear();lane_entities_.clear();midbosses_.clear();rift_teams_.clear();spell_projectiles_.clear();unsupported_projectiles_=0; std::vector<unsigned char> block(512*0x70);
     for (uint32_t c=0;c<64;++c) {
         if (!chunks[c] || !read(chunks[c],block.data(),block.size())) continue;
         for (uint32_t s=0;s<512;++s) {
@@ -235,6 +239,9 @@ bool GameReader::enumerate(uintptr_t system) {
             if (!ptr || index>0x7ffe || handle==UINT32_MAX || (handle&0x7fff)!=index) continue;
             auto name=type(ptr);
             if (name.find("CitadelPlayerController")!=std::string::npos) controllers_.push_back({ptr,handle});
+            if(options_.world&&(world_category_bit(world_kind(name))&options_.world_mask)&&world_entities_.size()<4096)world_entities_.push_back({ptr,handle});
+            if(((options_.minimap&&options_.minimap_lanes)||options_.rift)&&name==".?AVC_CitadelZiplinePath@@"&&lane_entities_.size()<32)lane_entities_.push_back({ptr,handle});
+            if(options_.rift&&name==".?AVC_CitadelTeam@@"&&rift_teams_.size()<8)rift_teams_.push_back({ptr,handle});
             if(options_.midboss&&name==".?AVC_NPC_MidBoss@@"&&midbosses_.size()<8)midbosses_.push_back({ptr,handle});
             if(options_.spell_parry) {
                 if((name==".?AVC_Citadel_Projectile_Archer_ChargedShot@@"||name==".?AVC_Citadel_Projectile_Bebop_Hook@@")&&spell_projectiles_.size()<128)
@@ -356,6 +363,7 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
         auto rig=resolve_bone_rig(bone_names,parents);
         info.regions=rig_regions(bone_names,parents,rig);
         info.index=rig.anchor();info.dots={rig.head,rig.body,rig.pelvis};info.rig=rig.prefix;
+        info.joints=external_joint_map(bone_names,rig.prefix,rig.head>=0?rig.head:rig.anchor(),rig.body,rig.pelvis);
         if(info.index>=0)info.name=bone_names[info.index];
         else info.error=rig.ambiguous?"Ambiguous player skeleton rig":"No supported head bone";
         info.edges=skeleton_edges(rig_skeleton_names(bone_names,rig),parents);
@@ -389,6 +397,7 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     }
     int first=info.index,last=info.index;
     for(auto index:info.dots)if(index>=0&&index<count){first=std::min(first,index);last=std::max(last,index);}
+    if(options_.joints)for(auto index:info.joints)if(index>=0&&index<count){first=std::min(first,index);last=std::max(last,index);}
     if(skeleton)for(auto [a,b]:info.edges){first=std::min(first,std::min(a,b));last=std::max(last,std::max(a,b));}
     if(body_bounds)for(auto index:info.bounds_bones){first=std::min(first,index);last=std::max(last,index);}
     if(hitbox_set)for(const auto& box:hitbox_set->boxes)if(box.bone>=0){first=std::min(first,box.bone);last=std::max(last,box.bone);}
@@ -397,6 +406,7 @@ bool GameReader::anchor(uintptr_t scene, Player& player,bool skeleton,bool hitbo
     auto position=[&](int index,Vec3& out){if(index<first||index>last)return false;std::memcpy(&out,positions.data()+(index-first)*0x20,sizeof(out));return finite(out);};
     if(!position(info.index,player.head))return fail("Invalid head transform");
     for(size_t i=0;i<info.dots.size();++i)player.dot_valid[i]=position(info.dots[i],player.dots[i]);
+    if(options_.joints)for(int j=0;j<16;++j)if(position(info.joints[j],player.joints[j]))player.joints_valid|=1u<<j;
     if(body_bounds)for(auto index:info.bounds_bones) {
         Vec3 point;if(position(index,point)&&player.body_point_count<player.body_points.size())player.body_points[player.body_point_count++]=point;
     }
@@ -734,16 +744,20 @@ MidBossState GameReader::midboss_state(uintptr_t rules,const std::array<uintptr_
     return midboss_cache_=state;
 }
 Snapshot GameReader::sample(ReadOptions options) {
+    if(options.rift!=options_.rift){next_enumerate_=0;next_rift_=0;rift_history_.reset();rift_cache_={};}
     if(options.parry)options.adaptive_motion=true;
     if(options.minions!=options_.minions||options.orbs!=options_.orbs||options.midboss!=options_.midboss||options.parry!=options_.parry||options.spell_parry!=options_.spell_parry)next_enumerate_=0;
+    if(options.observers!=options_.observers||options.puddle!=options_.puddle){next_enumerate_=0;next_observers_=0;}
+    if(options.world!=options_.world||options.minimap!=options_.minimap||options.world_mask!=options_.world_mask||options.minimap_lanes!=options_.minimap_lanes){next_enumerate_=0;breakables_.reset();}
     options_=options;
-    if(!options.enemy_tags)enemy_hero_labels_.clear();
+    if(!options.enemy_tags&&!options.metadata&&!(options.minimap&&options.minimap_players))enemy_hero_labels_.clear();
     if(!options.adaptive_motion)adaptive_motions_.clear();
     const auto started=std::chrono::steady_clock::now();read_calls_=0;
     Snapshot result;
     if (process_ && WaitForSingleObject(process_,0)!=WAIT_TIMEOUT) {detach();status_="Waiting for Deadlock";next_attach_=0;}
     if (!process_ && !attach()) {result.status=status_;return result;}
     result.pid=pid_;result.status=status_;result.reader_profile=profile_.source;
+    result.puddle_capable=profile_.features.puddle_radius&&profile_.features.puddle_reach&&profile_.features.puddle_state&&profile_.features.puddle_next&&profile_.features.puddle_normal&&profile_.features.puddle_position;
     auto rules=pointer(base_+profile_.addresses.game_rules);std::array<int,2> modes{};
     if(rules&&pointer(rules)==base_+profile_.addresses.rules_vtable&&read(rules+profile_.fields.match_mode,modes)&&pointer(base_+profile_.addresses.game_rules)==rules) {
         result.match_mode=modes[0];result.game_mode=modes[1];
@@ -793,7 +807,7 @@ Snapshot GameReader::sample(ReadOptions options) {
     now=GetTickCount64();
     if(!read_projection(result)){result.status="Waiting for a stable render view";return result;}
     result.camera_valid=camera_origin(result.matrix,result.camera_position);
-    if (now>=next_enumerate_) {if (!enumerate(system)) {result.status="Cannot read entity list";return result;} next_enumerate_=now+(options.spell_parry?20:(options.minions||options.orbs||options.parry)?100:1000);}
+    if (now>=next_enumerate_) {if (!enumerate(system)) {result.status="Cannot read entity list";return result;} next_enumerate_=now+(options.spell_parry?20:(options.minions||options.orbs||options.parry||options.observers||options.world||options.minimap||options.rift)?100:1000);}
     result.controllers=static_cast<int>(controllers_.size());
     std::array<uintptr_t,64> chunks{};
     if(!read(system+0x10,chunks)){result.status="Cannot read current entity chunks";return result;}
@@ -818,6 +832,8 @@ Snapshot GameReader::sample(ReadOptions options) {
             Player local;uintptr_t scene{};uint8_t life{};
             if(pawn_fields(pawn.address,local,scene,life)&&entity(chunks,handle).address==pawn.address) {
                 result.local_team=local.team;
+                if(options.decorations||options.world||options.minimap||options.enemy_tags){std::array<float,8> wt{};if(read(scene+profile_.fields.node_world,wt)){local.origin={wt[0],wt[1],wt[2]};local.origin_valid=finite(local.origin);}}
+                if(options.decorations){Hitbox box;if(collision_hitbox(pawn,box))local.activation_bounds=box;}
                 result.local_alive=!life&&local.health>0&&local.maximum>0;
                 result.local_motion=read_motion(pawn.address,scene,handle);
             }
@@ -825,12 +841,15 @@ Snapshot GameReader::sample(ReadOptions options) {
             if(scene&&anchor(scene,local)&&local.dot_valid[2]&&entity(chunks,handle).address==pawn.address){
                 local_motion_.update(local.dots[2],now);result.local_velocity=local_motion_.velocity;result.local_velocity_valid=local_motion_.valid;
             }else local_motion_={};
+            if(local.origin_valid){local.hero_id=result.hero.id;local.hero_name=result.hero.name;local.handle=handle;result.local_player=local;result.local_player_valid=true;}
+            if((options.helpers||options.assassinate)&&result.local_alive)read_external_local(result,chunks,pawn,rules);
+            if(options.assassinate&&result.local_alive)read_assassinate(result,chunks,pawn);
             if(options.parry&&result.local_alive) {
                 read_parry_local(result.parry,chunks,pawn,rules);
                 result.parry.local_velocity=result.local_motion.velocity_valid?result.local_motion.velocity:result.local_velocity_valid?result.local_velocity:Vec3{};
             }
             uint32_t current_handle{};
-            if(!read(controller.address+profile_.fields.pawn_handle,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.view_input={};result.parry={};result.local_team=0;result.local_alive=false;result.local_velocity_valid=false;result.local_motion={};local_motion_={};}
+            if(!read(controller.address+profile_.fields.pawn_handle,current_handle)||current_handle!=handle){result.hero={};result.weapon={};result.view_input={};result.parry={};result.helpers={};result.assassinate={};result.local_player_valid=false;result.local_team=0;result.local_alive=false;result.local_velocity_valid=false;result.local_motion={};local_motion_={};}
             skip("Local player");
             continue;
         }
@@ -838,6 +857,10 @@ Snapshot GameReader::sample(ReadOptions options) {
         if (pawn_type.find("CitadelPlayerPawn")==std::string::npos) {skip(pawn_type.empty()?"Pawn type unavailable":"Unsupported pawn type: "+pawn_type);continue;}
         uintptr_t scene{}; Player p; p.handle=handle;uint8_t life{},dormant{};
         if(!pawn_fields(pawn.address,p,scene,life)){skip("Cannot read pawn fields");continue;}
+        if(options.puddle)read_puddle(result,chunks,pawn,p.team);
+        if(options.metadata)read_external_player(p,controller,pawn);
+        if(options.decorations||options.metadata){std::array<float,8> root_transform{};if(scene&&read(scene+f.node_world,root_transform)){p.origin={root_transform[0],root_transform[1],root_transform[2]};p.origin_valid=finite(p.origin);}}
+        if(options.decorations||options.metadata){Hitbox bounds;if(collision_hitbox(pawn,bounds))p.activation_bounds=bounds;}
         if(life||p.health<=0){skip("Dead player");continue;}
         if(p.maximum<=0){skip("Invalid maximum health");continue;}
         if(!scene){skip("Scene unavailable");continue;}
@@ -845,9 +868,17 @@ Snapshot GameReader::sample(ReadOptions options) {
         if(dormant){skip("Dormant player");continue;}
         uint32_t disabled_groups{};
         bool hitboxes=options.hitboxes&&read(pawn.address+profile_.fields.disabled_groups,disabled_groups);
-        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups,options.healthbar_bounds)) {++result.missing_anchors;skip(p.anchor_status,p.model_name);continue;}
+        if (!anchor(scene,p,options.skeletons,hitboxes,disabled_groups,options.healthbar_bounds)) {
+            ++result.missing_anchors;skip(p.anchor_status,p.model_name);
+            // A map icon needs a validated root, not a recognized skeleton rig.
+            // Never create focus points or hitboxes from this fallback.
+            if(!options.minimap||!options.minimap_players)continue;
+            std::array<float,8> root{};p.origin_valid=read(scene+f.node_world,root)&&scene_point(root,{},p.origin);
+            if(!p.origin_valid)continue;p.feet=p.origin;p.feet_valid=true;
+            p.head={};p.dot_valid.fill(false);p.dots={};p.joints_valid=0;p.skeleton.clear();p.hitboxes.clear();p.body_point_count=0;p.activation_bounds.reset();
+        }
         if(hitboxes){uint32_t after{};if(!read(pawn.address+profile_.fields.disabled_groups,after)||after!=disabled_groups){p.hitboxes.clear();p.hitbox_status="Hit groups changed during sample";}}
-        if(options.enemy_tags) {
+        if(options.enemy_tags||options.metadata||(options.minimap&&options.minimap_players)) {
             // Source player origins follow the feet, including jumps and slides.
             // This avoids assuming a fixed distance below the pelvis or head.
             std::array<float,8> root{};
@@ -858,11 +889,13 @@ Snapshot GameReader::sample(ReadOptions options) {
                 // Assassinate cache or activate the local ultimate profile.
                 auto hero=hero_profile(chunks,pawn,false);
                 if(enemy_hero_labels_.size()>=512&&found==enemy_hero_labels_.end())enemy_hero_labels_.clear();
-                found=enemy_hero_labels_.insert_or_assign(handle,EnemyHeroLabel{pawn.address,p.model_name,hero.valid?hero.name:std::string{},now+(hero.valid?500:100)}).first;
+                found=enemy_hero_labels_.insert_or_assign(handle,EnemyHeroLabel{pawn.address,p.model_name,hero.valid?hero.name:std::string{},now+(hero.valid?500:100),hero.valid?hero.id:0}).first;
             }
             p.hero_name=found->second.name;
+            p.hero_id=found->second.id;if(p.feet_valid){p.origin=p.feet;p.origin_valid=true;}
         }
         if (entity(chunks,handle).address!=pawn.address) {skip("Pawn identity changed",p.model_name);continue;}
+        if(options.assassinate&&assassinate_health_eligible(p.health,p.maximum))read_assassinate_defense(p,pawn);
         p.motion=read_motion(pawn.address,scene,handle);
         if(entity(chunks,handle).address!=pawn.address){skip("Pawn identity changed",p.model_name);continue;}
         if(p.dot_valid[2]&&(velocities_.size()<512||velocities_.contains(handle))){auto& estimate=velocities_[handle];estimate.update(p.dots[2],now);p.velocity=estimate.velocity;p.velocity_valid=estimate.valid;}
@@ -882,6 +915,7 @@ Snapshot GameReader::sample(ReadOptions options) {
         if(!scene||life||!read(scene+profile_.fields.dormant,dormant)||dormant)continue;
         if(object.kind==TargetKind::Minion&&(target.health<=0||target.maximum<=0))continue;
         if(!extra_anchor(object,scene,target)||entity(chunks,object.handle).address!=object.address||pointer(object.address+profile_.fields.scene_node)!=scene)continue;
+        if(options.decorations){std::array<float,8> wt{};if(read(scene+profile_.fields.node_world,wt)){target.origin={wt[0],wt[1],wt[2]};target.origin_valid=finite(target.origin);}}
         if(object.kind==TargetKind::SoulOrb)target.orb=orb_state(object.address,rules);
         target.motion=read_motion(object.address,scene,object.handle);
         if(entity(chunks,object.handle).address!=object.address)continue;
@@ -931,6 +965,9 @@ Snapshot GameReader::sample(ReadOptions options) {
         }
     }
     result.visibility_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-ray_started).count();
+    if(options.world||options.minimap)read_world(result,chunks,rules,now);
+    if(options.rift)read_rift(result,chunks,rules,now);
+    if(options.observers)read_observers(result,chunks,now);
     result.time=GetTickCount64();result.read_calls=read_calls_;
     result.sample_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-started).count();return result;
 }

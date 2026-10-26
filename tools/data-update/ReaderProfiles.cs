@@ -20,7 +20,7 @@ static class ReaderProfiles {
     sealed record Operand(int Offset, int Addend,int Width=4);
     sealed record LayoutValue(string Key, string Witness, Operand[] Operands, int Minimum, int Maximum, int Alignment);
     sealed record EnumValue(string Key, string Name);
-    sealed record Manifest(int Version, string Layout, Symbol[] Symbols, Vtable[] Vtables, Witness[] Witnesses, Vfunc[] Vfuncs, LayoutValue[] Values, EnumValue[] Enums);
+    sealed record Manifest(int Version, string Layout, Symbol[] Symbols, Vtable[] Vtables, Witness[] Witnesses, Vfunc[] Vfuncs, LayoutValue[] Values, EnumValue[] Enums, Witness[]? OptionalWitnesses=null);
     static string Resource(string name) {
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name) ?? throw new InvalidDataException("Missing profile resolver resource: " + name);
         using var reader = new StreamReader(stream); return reader.ReadToEnd().Replace("\r\n", "\n");
@@ -30,10 +30,10 @@ static class ReaderProfiles {
         // Bind the dump to the exact files it was produced from, not just similarly named SDK headers.
         var validation = JsonSerializer.Deserialize<SchemaValidation>(File.ReadAllText(Path.Combine(dump, "overlay-validation.json"))) ?? throw new InvalidDataException("Missing dump identity");
         if (validation.ClientSha256 != clientHash || validation.EngineSha256 != engineHash) throw new InvalidDataException("Schema dump belongs to a different DLL build. Run Dump schema first.");
-        string contract = Resource("ReaderContract"), signatures = Resource("ReaderSignatures");
+        string contract = Resource("ReaderContract"), signatures = Resource("ReaderSignatures"), features = Resource("ReaderFeatures");
         var manifest = JsonSerializer.Deserialize<Manifest>(signatures, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidDataException("Invalid resolver manifest");
         if (manifest.Version != 2 || manifest.Layout != "source2-reader-v2") throw new InvalidDataException("Unsupported resolver version");
-        string manifestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contract + signatures))).ToLowerInvariant();
+        string manifestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contract + signatures + features))).ToLowerInvariant();
         var offsets = new Dictionary<string, uint>();var representations = new Dictionary<string,(string Type,uint Width)>(); string cls = "";
         foreach (var line in File.ReadLines(Path.Combine(dump, "sdk", "client", "_offsets.hpp"))) {
             var ns = Regex.Match(line, @"^namespace (\w+) \{"); if (ns.Success) cls = ns.Groups[1].Value;
@@ -45,6 +45,12 @@ static class ReaderProfiles {
             }
         }
         var values = new Dictionary<string, uint>();
+        foreach (Match f in Regex.Matches(features, @"FEATURE_FIELD\((\w+),""([^""]+)"",""([^""]+)"",(\d+)\)")) {
+            string name=f.Groups[2].Value+"::"+f.Groups[3].Value;
+            if(offsets.TryGetValue(name,out uint value)&&value>0&&value<0x20000&&representations.TryGetValue(name,out var repr)&&repr.Width==uint.Parse(f.Groups[4].Value))
+                values.Add("feature."+f.Groups[1].Value,value);
+            else log("Optional feature field unavailable: "+name);
+        }
         foreach (Match f in Regex.Matches(contract, "PROFILE_FIELD\\((\\w+),(0x[\\da-fA-F]+),\"([^\"]+)\",\"([^\"]+)\"\\)")) {
             string name = f.Groups[3].Value + "::" + f.Groups[4].Value;
             if (!offsets.TryGetValue(name, out uint value) || value >= 0x20000) throw new InvalidDataException("Required schema field unavailable: " + name);
@@ -67,6 +73,21 @@ static class ReaderProfiles {
             if (value != Convert.ToUInt32(f.Groups[2].Value[2..], 16)) log($"Updated schema field {name}: 0x{value:X}");
         }
         var images = new Dictionary<string, PeImage> { ["client"] = new(client), ["engine"] = new(engine), ["world"] = new(world) };
+        foreach(Match f in Regex.Matches(features,@"FEATURE_SIZE\((\w+),""([^""]+)""\)")) {
+            try {
+                var header=File.ReadAllText(Path.Combine(dump,"sdk","client","structs",f.Groups[2].Value+".hpp"));
+                var size=Regex.Match(header,@"// Size: 0x([\da-fA-F]+)");uint value=Convert.ToUInt32(size.Groups[1].Value,16);
+                if(value<4||value>4096)throw new InvalidDataException("Class size outside bounds");values.Add("feature."+f.Groups[1].Value,value);
+            }catch(Exception e){log("Optional class size unavailable: "+f.Groups[2].Value+": "+e.Message);}
+        }
+        foreach(Match f in Regex.Matches(features,@"FEATURE_ENUM\((\w+),""([^""]+)""\)")) {
+            try{values.Add("feature."+f.Groups[1].Value,images["client"].ModifierValue(f.Groups[2].Value));}
+            catch(Exception e){log("Optional enum unavailable: "+f.Groups[2].Value+": "+e.Message);}
+        }
+        foreach(Match f in Regex.Matches(features,@"FEATURE_GLOBAL\((\w+),""([^""]+)""\)")) {
+            try{values.Add("feature."+f.Groups[1].Value,images["client"].NamedConvarSlot(f.Groups[2].Value));}
+            catch(Exception e){log("Optional ConVar unavailable: "+f.Groups[2].Value+": "+e.Message);}
+        }
         foreach (var symbol in manifest.Symbols) {
             cancel.ThrowIfCancellationRequested(); var image = images[symbol.Module]; var targets = new HashSet<uint>();
             foreach (var recipe in symbol.Recipes) {
@@ -148,6 +169,26 @@ static class ReaderProfiles {
                 log($"Resolved virtual field {item.Key}: 0x{value:X}");
             }
             log($"Private virtual layout {witness.Key}: verified slot {selected.Slot} at 0x{function:X}");
+        }
+        if(features.Contains("FEATURE_PRIVATE(puddle_radius)",StringComparison.Ordinal)) {
+            try {
+                var puddle=images["client"].PuddleViews(values["private.property_dirty"]);
+                values.Add("feature.puddle_radius",puddle.Radius);values.Add("feature.puddle_reach",puddle.Reach);
+                log($"Optional Puddle Punch views: radius=0x{puddle.Radius:X}, reach=0x{puddle.Reach:X}");
+            } catch(InvalidDataException e) {log("Optional Puddle Punch unavailable: "+e.Message);}
+        }
+        if(features.Contains("FEATURE_PRIVATE(assassinate_layout)",StringComparison.Ordinal)) {
+            try {
+                var witnesses=(manifest.OptionalWitnesses??[]).Where(w=>w.Key.StartsWith("assassinate_",StringComparison.Ordinal)).ToArray();
+                if(witnesses.Length<2||witnesses.Any(w=>images[w.Module].Matches(w.Pattern).Length!=1))
+                    throw new InvalidDataException("Ability definition/upgrade layout changed");
+                var views=images["client"].AssassinateViews(values["private.property_dirty"]);
+                foreach(var view in views)values.Add("feature."+view.Key,view.Value);
+                values.Add("feature.assassinate_layout",1);
+                if(witnesses.Count(w=>w.Key.StartsWith("assassinate_mod_",StringComparison.Ordinal))>=13)
+                    values.Add("feature.as_modifier_layout",1);
+                log("Optional Assassinate definition, scaling and upgrade layouts verified");
+            }catch(InvalidDataException e){log("Optional Auto Select damage reader unavailable: "+e.Message);}
         }
         // Every address in the C++ contract must be generated; no missing value may fall back to an old RVA.
         foreach (Match a in Regex.Matches(contract, "PROFILE_ADDRESS\\((\\w+),")) if (!values.ContainsKey("address." + a.Groups[1].Value)) throw new InvalidDataException("Unresolved address: " + a.Groups[1].Value);

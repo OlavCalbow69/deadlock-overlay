@@ -8,8 +8,13 @@
 #include "reader_profile.h"
 #include "adaptive_motion.h"
 #include "midboss.h"
+#include "rift.h"
 #include "parry_data.h"
 #include "orb_state.h"
+#include "external_data.h"
+#include "assassinate_data.h"
+#include "world_data.h"
+#include "map_lanes.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -26,8 +31,11 @@ inline TargetKind extra_target_kind(std::string_view name) {
     if(name==".?AVC_NPC_Trooper@@"||name==".?AVC_NPC_TrooperNeutral@@"||name==".?AVC_NPC_TrooperNeutralNodeMover@@")return TargetKind::Minion;
     return TargetKind::None;
 }
-struct ReadOptions { bool skeletons{},minions{},orbs{},hitboxes{},adaptive_motion{};bool midboss{true};bool parry{},spell_parry{},enemy_tags{},healthbar_bounds{}; };
+struct ReadOptions { bool skeletons{},minions{},orbs{},hitboxes{},adaptive_motion{};bool midboss{true};bool parry{},spell_parry{},enemy_tags{},healthbar_bounds{};bool metadata{},decorations{},observers{},helpers{},joints{},puddle{},world{},minimap{},minimap_lanes{true},minimap_players{true};unsigned world_mask{31};bool rift{},assassinate{}; };
 struct FocusTarget {
+    Vec3 origin{};bool origin_valid{};
+    std::array<Vec3,16> joints{};uint32_t joints_valid{};
+    int preferred_joint{-1}; // Per-target preference, never enlarges the free region.
     uint32_t handle{};
     TargetKind kind{TargetKind::Player};
     uint8_t team{};
@@ -49,9 +57,10 @@ struct FocusTarget {
 };
 struct SkeletonSegment { Vec3 a{},b{}; bool visible{},visibility_known{}; };
 struct Player : FocusTarget {
+    AssassinateDefense assassinate_defense;
     Vec3 head{};
     std::array<Vec3,64> body_points{};size_t body_point_count{};
-    Vec3 feet{};bool feet_valid{};std::string hero_name;
+    Vec3 feet{};bool feet_valid{};std::string hero_name,nickname;int level{-1},hero_id{};
     std::vector<SkeletonSegment> skeleton;
     int hitbox_set{-1};
     std::string hitbox_status;
@@ -76,6 +85,7 @@ struct Snapshot {
     bool replay{};
     bool practice{};int match_mode{-1},game_mode{-1};
     MidBossState midboss;
+    RiftState rift;
     ParryReadState parry;
     std::string map_name;
     std::string level_name,map_source;
@@ -87,6 +97,13 @@ struct Snapshot {
     Vec3 camera_position{};bool camera_valid{};
     std::string visibility_status{"Waiting for map"};
     double visibility_us{};
+    Player local_player;bool local_player_valid{};
+    HelperReadState helpers;
+    AssassinateReadState assassinate;
+    std::vector<std::string> spectators;
+    std::vector<PuddleThreat> puddles;
+    bool observers_valid{},puddle_capable{};
+    WorldState world;
     std::vector<Player> players;
     std::vector<PlayerReadSkip> skipped_players;
     std::vector<FocusTarget> focus_targets;
@@ -101,6 +118,10 @@ public:
     explicit GameReader(std::filesystem::path profile_file={}):profile_file_(std::move(profile_file)){}
     ~GameReader();
     Snapshot sample(ReadOptions options={});
+    std::vector<std::pair<std::string,std::vector<std::string>>> diagnostic_bones()const {
+        std::vector<std::pair<std::string,std::vector<std::string>>> result;
+        for(const auto& entry:models_)result.emplace_back(entry.second.model_name,entry.second.names);return result;
+    }
     void refresh_data(){detach();next_attach_=0;}
 private:
     ReaderProfile profile_;
@@ -116,7 +137,8 @@ private:
     uint64_t next_attach_{}, next_enumerate_{};
     struct Entity { uintptr_t address{}; uint32_t handle{}; TargetKind kind{TargetKind::None}; };
     struct BoneInfo {
-        int count{}, index{-1}; std::array<int,3> dots{-1,-1,-1};std::string name;
+        int count{}, index{-1}; std::array<int,3> dots{-1,-1,-1};std::array<int,16> joints;std::string name;
+        BoneInfo(){joints.fill(-1);}
         std::string model_name,rig,error;
         std::vector<std::pair<int,int>> edges;
         std::vector<int> bounds_bones;
@@ -132,7 +154,7 @@ private:
     std::unordered_map<std::string,std::string> hero_names_;
     struct HeroMetadata {uintptr_t address{};std::string name,token;};
     std::unordered_map<int,HeroMetadata> heroes_;
-    struct EnemyHeroLabel {uintptr_t pawn{};std::string model,name;uint64_t refresh_at{};};
+    struct EnemyHeroLabel {uintptr_t pawn{};std::string model,name;uint64_t refresh_at{};int id{};};
     std::unordered_map<uint32_t,EnemyHeroLabel> enemy_hero_labels_;
     uintptr_t ability_pawn_{};uint32_t sniper_handle_{UINT32_MAX};
     std::vector<uint32_t> ability_handles_;
@@ -140,7 +162,26 @@ private:
     std::vector<uint32_t> slide_abilities_;
     std::vector<Entity> controllers_;
     std::vector<Entity> extras_;
+    std::vector<Entity> world_entities_,lane_entities_;
+    GameAssetCatalog world_catalog_;bool world_catalog_attempted_{};
+    uint64_t next_world_catalog_{};std::filesystem::file_time_type world_catalog_stamp_{};
+    BreakableHistory breakables_;
+    void read_world(Snapshot&,const std::array<uintptr_t,64>&,uintptr_t,uint64_t);
+    std::vector<std::string> observer_cache_;uint64_t next_observers_{};
+    void read_external_local(Snapshot&,const std::array<uintptr_t,64>&,const Entity&,uintptr_t);
+    void read_assassinate(Snapshot&,const std::array<uintptr_t,64>&,const Entity&);
+    void read_assassinate_defense(Player&,const Entity&);
+    bool assassinate_modifier(const Entity&,uint32_t,float&,bool&,bool normalized=false) const;
+    bool assassinate_starting_stat(int,uint32_t,float&) const;
+    bool assassinate_spirit(const Snapshot&,const std::array<uintptr_t,64>&,const Entity&,float&,bool&);
+    void read_external_player(Player&,const Entity&,const Entity&);
+    void read_observers(Snapshot&,const std::array<uintptr_t,64>&,uint64_t);
+    void read_puddle(Snapshot&,const std::array<uintptr_t,64>&,const Entity&,uint8_t);
     std::vector<Entity> midbosses_;
+    std::vector<Entity> rift_teams_;
+    RiftHistory rift_history_;RiftState rift_cache_;uint64_t next_rift_{};
+    MapLaneCache map_lanes_;
+    void read_rift(Snapshot&,const std::array<uintptr_t,64>&,uintptr_t,uint64_t);
     std::vector<Entity> spell_projectiles_;
     unsigned unsupported_projectiles_{};
     uintptr_t counterspell_watcher_{};uint64_t next_counterspell_scan_{};
@@ -157,6 +198,8 @@ private:
     } melee_template_;
     MidBossState midboss_cache_;uint64_t next_midboss_{};
     ReadOptions options_;
+    std::unordered_map<uint32_t,std::pair<uint32_t,uint64_t>> puddle_cache_;
+    struct AssassinateTemplate {uintptr_t data{};std::array<unsigned char,40> map{};std::array<uintptr_t,7> definitions{};} assassinate_template_;
     std::unordered_map<uint32_t,VelocityEstimate> velocities_;
     std::unordered_map<uint32_t,RootMotionTracker> adaptive_motions_;
     VelocityEstimate local_motion_;uint32_t local_handle_{};

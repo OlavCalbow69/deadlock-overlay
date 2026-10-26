@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include "focus_input.h"
+#include "tracking_settings.h"
 #include "makcu_protocol.h"
 #include "calibration_bindings.h"
 #include <setupapi.h>
@@ -41,7 +42,13 @@ struct MakcuCalibrationControl {CalibrationBinding binding;bool down{};uint64_t 
 struct MakcuClickPending {
     HWND window{};uint64_t created{},generation{},valid_until{};unsigned interval_ms{150};
     bool hold_side{true};
+    CalibrationBinding binding;
+    uint64_t sequence{};
 };
+inline std::string makcu_shot_command(const CalibrationBinding& binding) {
+    if(!binding)return {};
+    return binding.mouse?"km.click("+std::to_string(binding.code)+",1,35)\r\n":"km.press("+std::to_string(binding.code)+",35,0)\r\n";
+}
 struct MakcuParryPending {
     HWND window{};CalibrationBinding binding;uint64_t created{},generation{},valid_until{},id{};bool hold_side{};
 };
@@ -159,7 +166,7 @@ class MakcuInput {
     }
     bool calibration_valid(uint64_t token,HWND window)const {
         return token&&token==calibration_.load()&&window==calibration_window_.load()&&GetTickCount64()<=calibration_deadline_.load()
-            &&IsWindow(window)&&!IsIconic(window)&&GetForegroundWindow()==window;
+            &&IsWindow(window)&&!IsIconic(window)&&GetForegroundWindow()==window&&gameplay_cursor_hidden()&&!(GetAsyncKeyState(VK_ESCAPE)&0x8000);
     }
     void status(std::string value){std::lock_guard lock(mutex_);status_=std::move(value);}
     static std::vector<std::wstring> ports() {
@@ -289,6 +296,7 @@ class MakcuInput {
                 const auto active_session=calibration_.load();
                 if(active_session&&!calibration_valid(active_session,calibration_window_.load())){calibration_=0;cancel_motion();}
                 if(owned_session&&!calibration_valid(owned_session,calibration_window_.load()))ok=release_owned();
+                if(control.id&&(!calibration_valid(control.session,calibration_window_.load())||!makcu_fresh(GetTickCount64(),control.created)))calibration_error_=true;
                 if(control.id&&calibration_valid(control.session,calibration_window_.load())&&makcu_fresh(GetTickCount64(),control.created)) {
                     auto existing=std::find(owned.begin(),owned.end(),control.binding);
                     if(control.down&&existing==owned.end()) {
@@ -328,16 +336,16 @@ class MakcuInput {
                     }
                 }
                 const uint64_t click_now=GetTickCount64();
-                if(ok&&!calibration_.load()&&!moved&&!parry_pulse_active()&&click.window&&click.generation==click_generation_.load()&&makcu_fresh(click_now,click.created)
+                if(ok&&(click.sequence?calibration_valid(click.sequence,click.window):!calibration_.load())&&!moved&&!parry_pulse_active()&&click.window&&click.generation==click_generation_.load()&&makcu_fresh(click_now,click.created)
                     &&click_now<=click.valid_until&&click_now>=last_click_.load()+click.interval_ms
                     &&IsWindow(click.window)&&!IsIconic(click.window)&&GetForegroundWindow()==click.window
-                    &&(!click.hold_side||focus_button_held(FocusHoldButton::SideButtons))&&!focus_button_held(FocusHoldButton::LeftMouse)&&!(GetAsyncKeyState(VK_ESCAPE)&0x8000)) {
+                    &&(!click.hold_side||focus_button_held(FocusHoldButton::SideButtons))&&click.binding&&!(GetAsyncKeyState(click.binding.vk)&0x8000)&&!focus_button_held(FocusHoldButton::LeftMouse)&&!(GetAsyncKeyState(VK_ESCAPE)&0x8000)) {
                     // V4 schedules the complete pulse, including release. Cancellation,
                     // disconnect or shutdown cannot strand a separately queued down event.
                     std::lock_guard lock(mutex_);
-                    if(click.generation==click_generation_.load()&&!calibration_.load()&&!windows_cleanup_.load()) {
-                        ok=write(handle,"km.click(1,1,35)\r\n");
-                        if(ok){last_click_=GetTickCount64();++clicks_;++sent_;}else ++failures_;
+                    if(click.generation==click_generation_.load()&&(click.sequence?calibration_valid(click.sequence,click.window):!calibration_.load())&&!windows_cleanup_.load()) {
+                        ok=write(handle,makcu_shot_command(click.binding));
+                        if(ok){mark_owned_key(click.binding.vk,GetTickCount64()+85);last_click_=GetTickCount64();++clicks_;++sent_;}else ++failures_;
                     }
                 }
                 if(GetTickCount64()>=next_probe){ok=ok&&write(handle,"km.version()\r\n");next_probe=GetTickCount64()+1000;}
@@ -367,12 +375,13 @@ public:
         calibration_=++next_calibration_;wake_.notify_one();return next_calibration_;
     }
     void keep_calibration(uint64_t token){if(token&&token==calibration_.load())calibration_deadline_=GetTickCount64()+100;}
-    void end_calibration(){calibration_=0;cancel();{std::lock_guard lock(mutex_);calibration_controls_.clear();}wake_.notify_one();}
+    void end_calibration(){for(auto& until:owned_input_until)if(until.load()==UINT64_MAX)until=GetTickCount64()+50;calibration_=0;cancel();{std::lock_guard lock(mutex_);calibration_controls_.clear();}wake_.notify_one();}
     bool calibration_cleanup()const{return calibration_owned_.load()!=0||(windows_owned_.load()&unsigned(WindowsKind::Calibration))!=0;}
     bool calibration_error()const{return calibration_error_.load();}
     bool calibration_live(uint64_t token)const{return token&&token==calibration_.load();}
     uint64_t calibration_control(uint64_t token,const CalibrationBinding& binding,bool down) {
         if(!binding||!token||!ready())return 0;
+        if(down&&!key_program_owned(binding.vk)&&(GetAsyncKeyState(binding.vk)&0x8000))return 0;
         std::lock_guard lock(mutex_);if(!ready()||!calibration_valid(token,calibration_window_.load()))return 0;
         if(!connected_.load()) {
             auto existing=std::find_if(windows_held_.begin(),windows_held_.end(),[&](const auto& held){return held.kind==WindowsKind::Calibration&&held.session==token&&held.binding==binding;});
@@ -382,11 +391,17 @@ public:
                 if(!windows_send(existing->release)){existing->release_now=true;windows_owned_update();calibration_error_=true;windows_wake_.notify_one();return 0;}
                 ++windows_releases_;windows_held_.erase(existing);windows_owned_update();
             }
+            mark_owned_key(binding.vk,down?UINT64_MAX:GetTickCount64()+50);
             auto id=++control_id_;control_sent_=id;++sent_;return id;
         }
         if(calibration_controls_.size()>=8)return 0;
-        auto id=++control_id_;calibration_controls_.push_back({binding,down,token,GetTickCount64(),id});wake_.notify_one();return id;
+        auto id=++control_id_;calibration_controls_.push_back({binding,down,token,GetTickCount64(),id});mark_owned_key(binding.vk,down?UINT64_MAX:GetTickCount64()+50);wake_.notify_one();return id;
     }
+    uint64_t begin_sequence(HWND game){return begin_calibration(game);}
+    void keep_sequence(uint64_t token){keep_calibration(token);}
+    void end_sequence(){end_calibration();}
+    uint64_t sequence_key(uint64_t token,const CalibrationBinding& binding,bool down){return calibration_control(token,binding,down);}
+    bool sequence_move(HWND game,long x,long y,uint64_t token){return calibration_move(game,x,y,token);}
     uint64_t control_sent()const{return control_sent_.load();}
     bool calibration_move(HWND game,long x,long y,uint64_t token) {
         auto command=makcu_move_command(x,y);if(command.empty()||!ready())return false;
@@ -396,6 +411,7 @@ public:
         wake_.notify_one();return true;
     }
     bool move(HWND game,long x,long y,FocusHoldButton hold_button=FocusHoldButton::SideButtons) {
+        if(!tracking_motion.apply(x,y))return true;
         auto command=makcu_move_command(x,y);if(command.empty()||!ready())return false;
         {std::lock_guard lock(mutex_);
             if(!ready()||!game||calibration_.load()||calibration_owned_.load())return false;
@@ -410,18 +426,23 @@ public:
         wake_.notify_one();return true;
     }
     bool click(HWND game,uint64_t valid_until,unsigned interval_ms=150,bool hold_side=true) {
+        return shot(game,calibration_binding("MOUSE1"),valid_until,interval_ms,hold_side);
+    }
+    bool sequence_shot(HWND game,const CalibrationBinding& binding,uint64_t valid_until,uint64_t token) {
+        return token&&shot(game,binding,valid_until,150,false,token);
+    }
+    bool shot(HWND game,const CalibrationBinding& binding,uint64_t valid_until,unsigned interval_ms=150,bool hold_side=true,uint64_t sequence=0) {
         const uint64_t now=GetTickCount64();interval_ms=std::clamp(interval_ms,80u,1000u);
-        if(!ready()||!game||now>valid_until||now<last_click_.load()+interval_ms)return false;
+        if(!binding||!ready()||!game||now>valid_until||now<last_click_.load()+interval_ms||(GetAsyncKeyState(binding.vk)&0x8000))return false;
         {std::lock_guard lock(mutex_);const auto write_now=GetTickCount64();
-            if(!ready()||calibration_.load()||calibration_owned_.load()||write_now>valid_until||write_now<last_click_.load()+interval_ms)return false;
+            if(!ready()||(sequence?!calibration_valid(sequence,game):(calibration_.load()||calibration_owned_.load()))||write_now>valid_until||write_now<last_click_.load()+interval_ms)return false;
             if(!connected_.load()) {
                 if(!input_window(game)||(hold_side&&!focus_button_held(FocusHoldButton::SideButtons))||focus_button_held(FocusHoldButton::LeftMouse)
                     ||(GetAsyncKeyState(VK_ESCAPE)&0x8000)||parry_pulse_active()||windows_owned_.load())return false;
-                CalibrationBinding left{1,true,VK_LBUTTON,"MOUSE1"};
-                if(!windows_down(game,left,WindowsKind::Click,write_now+35))return false;
-                last_click_=write_now;++windows_clicks_;++clicks_;++sent_;return true;
+                if(!windows_down(game,binding,WindowsKind::Click,write_now+35))return false;
+                mark_owned_key(binding.vk,write_now+85);last_click_=write_now;++windows_clicks_;++clicks_;++sent_;return true;
             }
-            pending_click_={game,write_now,click_generation_.load(),valid_until,interval_ms,hold_side};}
+            pending_click_={game,write_now,click_generation_.load(),valid_until,interval_ms,hold_side,binding,sequence};}
         wake_.notify_one();return true;
     }
     uint64_t parry(HWND game,const CalibrationBinding& binding,uint64_t valid_until,bool hold_side) {
@@ -433,9 +454,9 @@ public:
             if(!input_window(game)||(hold_side&&!focus_button_held(FocusHoldButton::SideButtons))
                 ||(GetAsyncKeyState(binding.vk)&0x8000)||(GetAsyncKeyState(VK_ESCAPE)&0x8000)||(windows_owned_.load()&~unsigned(WindowsKind::Click)))return 0;
             if(!windows_down(game,binding,WindowsKind::Parry,write_now+35))return 0;
-            auto id=++parry_id_;last_parry_=write_now;parry_sent_id_=id;++windows_parries_;++parries_;++sent_;return id;
+            mark_owned_key(binding.vk,write_now+100);auto id=++parry_id_;last_parry_=write_now;parry_sent_id_=id;++windows_parries_;++parries_;++sent_;return id;
         }
-        auto id=++parry_id_;pending_parry_={game,binding,write_now,parry_generation_.load(),valid_until,id,hold_side};wake_.notify_one();return id;
+        mark_owned_key(binding.vk,write_now+100);auto id=++parry_id_;pending_parry_={game,binding,write_now,parry_generation_.load(),valid_until,id,hold_side};wake_.notify_one();return id;
     }
     uint64_t parry_sent_id()const{return parry_sent_id_.load();}
     uint64_t parries()const{return parries_.load();}

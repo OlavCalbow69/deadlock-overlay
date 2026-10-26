@@ -28,16 +28,16 @@ struct CalibrationBinding {
 inline CalibrationBinding calibration_binding(std::string name) {
     std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return char(std::toupper(c));});
     CalibrationBinding b;b.label=name;
-    if(name.size()==6&&name.starts_with("MOUSE")&&name[5]>='2'&&name[5]<='5') {
-        b.code=unsigned(name[5]-'0');b.mouse=true;static const int keys[]={0,0,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};b.vk=keys[b.code];return b;
+    if(name.size()==6&&name.starts_with("MOUSE")&&name[5]>='1'&&name[5]<='5') {
+        b.code=unsigned(name[5]-'0');b.mouse=true;static const int keys[]={0,VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};b.vk=keys[b.code];return b;
     }
     if(name.size()==1&&name[0]>='A'&&name[0]<='Z'){b.code=unsigned(name[0]-'A')+4;b.vk=name[0];return b;}
     if(name.size()==1&&name[0]>='0'&&name[0]<='9'){b.code=name[0]=='0'?39:unsigned(name[0]-'1')+30;b.vk=name[0];return b;}
     if(name.size()>=2&&name.size()<=3&&name[0]=='F'&&std::all_of(name.begin()+1,name.end(),[](char c){return c>='0'&&c<='9';})) {
-        int n=std::stoi(name.substr(1));if(n>=1&&n<=12){b.code=unsigned(n)+57;b.vk=VK_F1+n-1;return b;}
+        int n=std::stoi(name.substr(1));if(n>=1&&n<=24){b.code=unsigned(n)+(n<=12?57:91);b.vk=VK_F1+n-1;return b;}
     }
     struct Key {const char* name;unsigned hid;int vk;};
-    static constexpr Key keys[]={{"SPACE",44,VK_SPACE},{"TAB",43,VK_TAB},{"SHIFT",225,VK_LSHIFT},{"CTRL",224,VK_LCONTROL},{"ALT",226,VK_LMENU},
+    static constexpr Key keys[]={{"SPACE",44,VK_SPACE},{"TAB",43,VK_TAB},{"ENTER",40,VK_RETURN},{"UPARROW",82,VK_UP},{"DOWNARROW",81,VK_DOWN},{"LEFTARROW",80,VK_LEFT},{"RIGHTARROW",79,VK_RIGHT},{"SHIFT",225,VK_LSHIFT},{"CTRL",224,VK_LCONTROL},{"ALT",226,VK_LMENU},
         {"CAPSLOCK",57,VK_CAPITAL},{"BACKSPACE",42,VK_BACK},{"SEMICOLON",51,VK_OEM_1},{"'",52,VK_OEM_7},{",",54,VK_OEM_COMMA},
         {".",55,VK_OEM_PERIOD},{"/",56,VK_OEM_2},{"[",47,VK_OEM_4},{"]",48,VK_OEM_6},{"\\",49,VK_OEM_5},{"-",45,VK_OEM_MINUS},{"=",46,VK_OEM_PLUS}};
     for(auto k:keys)if(name==k.name){b.code=k.hid;b.vk=k.vk;return b;}return {};
@@ -83,9 +83,21 @@ inline std::filesystem::path steam_path() {
 }
 }
 struct CalibrationBindings {
-    CalibrationBinding zoom,ultimate,cancel;std::string source{"Game bindings unavailable"};
+    CalibrationBinding zoom,ultimate,cancel,parry,attack;std::string source{"Game bindings unavailable"};
 };
-inline CalibrationBindings find_calibration_bindings(const std::string& hero) {
+inline void apply_binding_overrides(CalibrationBindings& result,const calibration_keys::Node& root) {
+    using namespace calibration_keys;auto* keys=child(child(&root,"config"),"bindings");if(!keys)return;
+    for(const auto& [name,node]:keys->children) {
+        auto binding=calibration_binding(name);if(!binding)continue;
+        for(auto key:{&result.zoom,&result.ultimate,&result.cancel,&result.parry,&result.attack})if(*key==binding)*key={};
+        auto command=node.value;std::transform(command.begin(),command.end(),command.begin(),[](unsigned char c){return char(std::toupper(c));});
+        if(command=="+IN_ABILITY_HELD"||command=="+PARRY")result.parry=binding;
+        else if(command=="+IN_ABILITY4")result.ultimate=binding;
+        else if(command=="+ATTACK")result.attack=binding;
+        else if(command=="+ATTACK2")result.zoom=binding;
+    }
+}
+inline CalibrationBindings find_calibration_bindings(const std::string& hero,HWND game=nullptr) {
     using namespace calibration_keys;CalibrationBindings result;auto steam=steam_path();if(steam.empty())return result;
     DWORD active{},size=sizeof(active);RegGetValueW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam\\ActiveProcess",L"ActiveUser",RRF_RT_REG_DWORD,nullptr,&active,&size);
     std::filesystem::path selected;std::error_code ec;auto users=steam/L"userdata";
@@ -104,7 +116,18 @@ inline CalibrationBindings find_calibration_bindings(const std::string& hero) {
     result.zoom=action(child(overrides,"ADS")?overrides:keys,"ADS");
     result.ultimate=action(child(overrides,"Ability4")?overrides:keys,"Ability4");
     result.cancel=action(child(overrides,"CancelAbility")?overrides:keys,"CancelAbility");
-    result.source="Saved game bindings";return result;
+    result.parry=action(child(overrides,"Parry")?overrides:keys,"Parry");
+    if(!result.parry)result.parry=action(keys,"HeldItem");
+    result.attack=action(child(overrides,"Attack")?overrides:keys,"Attack");
+    auto app=selected.parent_path().parent_path().parent_path();
+    apply_binding_overrides(result,file(app/L"local/cfg/user_keys_0_slot0.vcfg"));
+    DWORD pid{};if(game)GetWindowThreadProcessId(game,&pid);
+    if(pid) {
+        auto process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);wchar_t path[32768]{};DWORD length=32768;
+        if(process){if(QueryFullProcessImageNameW(process,0,path,&length))apply_binding_overrides(result,file(std::filesystem::path(path).parent_path().parent_path().parent_path()/L"citadel/cfg/user_keys_0_slot0.vcfg"));CloseHandle(process);}
+    }
+    for(auto key:{&result.zoom,&result.ultimate,&result.cancel,&result.parry,&result.attack})if(key->vk==VK_INSERT||key->vk==VK_ESCAPE)*key={};
+    result.source="Saved game bindings and exact console overrides";return result;
 }
 // Raw input includes the device's own injected counts. Consume only the exact
 // expected signed pulse; any excess, off-axis movement or wheel input cancels.

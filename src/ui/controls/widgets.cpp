@@ -88,9 +88,9 @@ struct overlay
     select_state* state = nullptr;
     ImRect trigger;
     float width = 0.f;
-    const char* const* options = nullptr;
+    std::vector<std::string> options;
     int option_count = 0;
-    int* value = nullptr;
+    int selected = -1;
 };
 
 std::vector<overlay>& overlays()
@@ -703,6 +703,7 @@ bool tabs(const char* id, const ImVec2& pos, const char* const* labels, int coun
 void select(const char* id, const ImVec2& pos, float width, const char* const* options, int count,
             int* value, const char* placeholder)
 {
+    if (!value || !options || count <= 0 || count > 256) return;
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     ImDrawList* dl = window->DrawList;
     const float dt = ImGui::GetIO().DeltaTime;
@@ -721,7 +722,33 @@ void select(const char* id, const ImVec2& pos, float width, const char* const* o
     if (ImGui::ButtonBehavior(bb, item_id, &hovered, &held))
         st->open = !st->open;
 
+    if (ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled)
+        st->open = false;
+
     st->panel.update(st->open, dt, 0.18f);
+
+    // Resolve input while the caller's value and option array are still alive.
+    // Some callers edit a local enum adapter before returning from their page.
+    if (st->open && !st->panel.exiting)
+    {
+        const float row = px(30.f), pad = px(4.f);
+        const ImRect panel({bb.Min.x, bb.Max.y + px(6.f)},
+                           {bb.Min.x + width, bb.Max.y + px(6.f) + pad * 2 + row * count});
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                const float delay = k_list_delay + float(i) * k_list_stagger;
+                const float ip = mo::EASE_OUT(ImClamp((st->panel.in-delay)/k_item_move, 0.f, 1.f));
+                const float dy = px(-6.f * (1.f-ip));
+                const ImRect item({panel.Min.x+pad, panel.Min.y+pad+row*i+dy},
+                                  {panel.Max.x-pad, panel.Min.y+pad+row*(i+1)+dy});
+                if (item.Contains(mouse)) {*value=i;st->open=false;ImGui::SetKeyOwner(ImGuiKey_MouseLeft,item_id,ImGuiInputFlags_LockUntilRelease);break;}
+            }
+            if (!panel.Contains(mouse) && !bb.Contains(mouse)) st->open=false;
+        }
+    }
 
     const ImU32 border =
         st->border.update(hovered || st->open ? c_border_strong : c_border, dt, 0.15f);
@@ -751,10 +778,11 @@ void select(const char* id, const ImVec2& pos, float width, const char* const* o
         ov.state = st;
         ov.trigger = bb;
         ov.width = width;
-        ov.value = value;
-        ov.options = options;
+        ov.selected = *value;
+        ov.options.reserve(count);
+        for (int i=0;i<count;++i) ov.options.emplace_back(options[i] ? options[i] : "");
         ov.option_count = count;
-        overlays().push_back(ov);
+        overlays().push_back(std::move(ov));
     }
 
     ImGui::PopID();
@@ -1048,24 +1076,19 @@ void flush_overlays()
             {
                 dl->AddRectFilled(r.Min, r.Max, mo::with_alpha(c_card, item_o), px(8.f));
 
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-                {
-                    *ov.value = i;
-                    st->open = false;
-                }
             }
 
             const ImU32 col =
-                mo::with_alpha(hot || *ov.value == i ? c_foreground : c_muted_foreground, item_o);
+                mo::with_alpha(hot || ov.selected == i ? c_foreground : c_muted_foreground, item_o);
             if (blur > 0.25f)
                 draw_text_blur(dl, f,
                                ImVec2(r.Min.x + px(10.f), r.GetCenter().y - f->LegacySize * 0.5f),
-                               col, ov.options[i], px(blur));
+                               col, ov.options[i].c_str(), px(blur));
             else
                 draw_text(dl, f, ImVec2(r.Min.x + px(10.f), r.GetCenter().y - f->LegacySize * 0.5f),
-                          col, ov.options[i]);
+                          col, ov.options[i].c_str());
 
-            if (*ov.value == i)
+            if (ov.selected == i)
                 icons::draw(icons::id::check, dl,
                             ImVec2(r.Max.x - px(10.f) - px(14.f), r.GetCenter().y - px(7.f)),
                             px(14.f), col);

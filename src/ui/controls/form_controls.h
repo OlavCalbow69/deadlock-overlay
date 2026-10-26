@@ -112,5 +112,5 @@ struct stateful_button_state
 void stateful_button_update(stateful_button_state& state, button_state status, const char* label,
                             float delta_time);
 bool stateful_button_draw(const char* id, stateful_button_state& state, button_state status,
-                          const ImVec2& pos, float width, bool disabled);
+                          const ImVec2& pos, float width, bool disabled, float height = 0.f);
 } // namespace solace

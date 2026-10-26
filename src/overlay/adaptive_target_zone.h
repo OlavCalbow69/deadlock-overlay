@@ -6,10 +6,26 @@
 #include <span>
 
 namespace overlay {
-inline AnatomicalRegion preferred_region(int bone){return bone==0?AnatomicalRegion::Head:bone==2?AnatomicalRegion::Pelvis:AnatomicalRegion::Torso;}
+inline bool adaptive_area_accepts(const Matrix& matrix,Vec3 point,const AdaptiveSettings& settings,float degrees,bool retained=false) {
+    float scale=retained?1.3f:1.f;
+    if(settings.area==AdaptiveAreaMode::PixelCircle||settings.area==AdaptiveAreaMode::PixelSquare) {
+        ScreenPoint p;if(focus_pixel_width<=0||focus_pixel_height<=0||!focus_project(matrix,point,focus_pixel_width,focus_pixel_height,p))return false;
+        auto c=focus_reference(focus_pixel_width,focus_pixel_height);float dx=std::abs(p.x-c.x),dy=std::abs(p.y-c.y),radius=settings.pixel_radius*scale;
+        return settings.area==AdaptiveAreaMode::PixelSquare?dx<=radius&&dy<=radius:std::hypot(dx,dy)<=radius;
+    }
+    return degrees<=settings.radius_degrees*scale;
+}
+inline AnatomicalRegion preferred_region(int bone){if(bone>=3){int joint=bone-3;return joint<2?AnatomicalRegion::Head:joint==3?AnatomicalRegion::Pelvis:joint>=4?AnatomicalRegion::Limb:AnatomicalRegion::Torso;}return bone==0?AnatomicalRegion::Head:bone==2?AnatomicalRegion::Pelvis:AnatomicalRegion::Torso;}
 inline bool adaptive_permits(const FocusTarget& target,const Hitbox& box,const AdaptiveSettings& settings,int bone) {
     if(target.kind!=TargetKind::Player||settings.region==AdaptiveRegion::WholeBody)return true;
-    if(settings.region==AdaptiveRegion::SelectedBone)return box.region==preferred_region(bone);
+    if(settings.region==AdaptiveRegion::SelectedBone) {
+        if(target.preferred_joint>=0&&target.preferred_joint<16&&(target.joints_valid&(1u<<target.preferred_joint))) {
+            const auto point=target.joints[target.preferred_joint];uint64_t source{};float best=FLT_MAX;
+            for(const auto& candidate:target.hitboxes){auto delta=sub(hitbox_center(candidate),point);float distance=dot(delta,delta);if(distance<best){best=distance;source=candidate.source_id;}}
+            return source&&box.source_id==source;
+        }
+        return box.region==preferred_region(bone);
+    }
     return box.region==AnatomicalRegion::Head||box.region==AnatomicalRegion::Torso||box.region==AnatomicalRegion::Pelvis;
 }
 namespace target_zone {
@@ -123,7 +139,7 @@ public:
         for(const auto& p:s.focus_targets)build(p,settings,bone,fresh);
         std::erase_if(entries_,[&](const auto& pair){return pair.second.seen!=generation_;});
         Vec3 origin,direction;
-        if(hitbox_focus::ray(s.matrix,2,2,{1,1},origin,direction))for(auto& [id,entry]:entries_) {
+        if(hitbox_focus::ray(s.matrix,2,2,focus_reference(2,2),origin,direction))for(auto& [id,entry]:entries_) {
             auto& zone=entry.zone;if(!zone.valid)continue;
             zone.activation_hit=target_zone::intersects(zone.activation,origin,direction);
             zone.retention_hit=target_zone::intersects(zone.retention,origin,direction);

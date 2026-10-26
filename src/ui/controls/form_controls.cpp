@@ -601,7 +601,7 @@ void stateful_button_update(stateful_button_state& st, button_state state, const
 }
 
 bool stateful_button_draw(const char* id, stateful_button_state& st, button_state state,
-                          const ImVec2& pos, float width, bool disabled)
+                          const ImVec2& pos, float width, bool disabled, float requested_height)
 {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     ImDrawList* dl = window->DrawList;
@@ -610,7 +610,7 @@ bool stateful_button_draw(const char* id, stateful_button_state& st, button_stat
     ImGui::PushID(id);
     const ImGuiID item_id = window->GetID("button");
 
-    const float height = px(sp_12);
+    const float height = requested_height > 0.f ? requested_height : px(sp_12);
     const ImRect bb(pos, ImVec2(pos.x + width, pos.y + height));
 
     ImGui::SetCursorScreenPos(bb.Min);

@@ -9,7 +9,11 @@ inline Vec3 add(Vec3 a,Vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 inline Vec3 sub(Vec3 a,Vec3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline Vec3 mul(Vec3 a,float k){return {a.x*k,a.y*k,a.z*k};}
 inline float dot(Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+inline float world_distance(Vec3 a,Vec3 b){auto d=sub(a,b);return std::sqrt(dot(d,d));}
 inline Vec3 cross(Vec3 a,Vec3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
+inline ScreenPoint focus_reference_offset{};
+inline float focus_pixel_width{},focus_pixel_height{};
+inline ScreenPoint focus_reference(float width,float height){return {width*(.5f+focus_reference_offset.x),height*(.5f+focus_reference_offset.y)};}
 struct ProjectionInfo {bool valid{};float horizontal_fov{},vertical_fov{},aspect{};};
 inline ProjectionInfo projection_info(const Matrix& matrix) {
     for(float value:matrix)if(!std::isfinite(value))return {};

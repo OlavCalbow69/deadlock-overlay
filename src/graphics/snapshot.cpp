@@ -4,6 +4,8 @@
 #include <wrl/client.h>
 
 #include <utility>
+#include <memory>
+#include <unordered_map>
 
 namespace solace::snapshot
 {
@@ -64,52 +66,56 @@ struct texture_copy
     }
 };
 
-texture_copy g_snapshot;
-texture_copy g_backdrop;
-bool g_requested = false;
-bool g_ready = false;
-bool g_backdrop_ready = false;
-
-ID3D11Device* g_device = nullptr;
-ID3D11DeviceContext* g_context = nullptr;
-IDXGISwapChain* g_swap_chain = nullptr;
+struct surface_state {
+    texture_copy snapshot, backdrop;
+    bool requested{}, ready{}, backdrop_ready{};
+    ID3D11Device* device{};
+    ID3D11DeviceContext* context{};
+    IDXGISwapChain* swap_chain{};
+};
+std::unordered_map<ImGuiContext*,std::unique_ptr<surface_state>> surfaces;
+surface_state& state() {
+    auto& value=surfaces[ImGui::GetCurrentContext()];
+    if(!value)value=std::make_unique<surface_state>();
+    return *value;
+}
 
 void backdrop_callback(const ImDrawList*, const ImDrawCmd*)
 {
-    if (!g_device || !g_context || !g_swap_chain)
+    if (!state().device || !state().context || !state().swap_chain)
         return;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
-    if (FAILED(g_swap_chain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+    if (FAILED(state().swap_chain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
         return;
 
     D3D11_TEXTURE2D_DESC description{};
     backbuffer->GetDesc(&description);
-    if (!g_backdrop.ensure(g_device, description))
+    if (!state().backdrop.ensure(state().device, description))
         return;
 
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> render_target;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depth_stencil;
-    g_context->OMGetRenderTargets(1, &render_target, &depth_stencil);
-    g_context->OMSetRenderTargets(0, nullptr, nullptr);
-    g_context->CopyResource(g_backdrop.texture.Get(), backbuffer.Get());
+    state().context->OMGetRenderTargets(1, &render_target, &depth_stencil);
+    state().context->OMSetRenderTargets(0, nullptr, nullptr);
+    state().context->CopyResource(state().backdrop.texture.Get(), backbuffer.Get());
 
     ID3D11RenderTargetView* target = render_target.Get();
-    g_context->OMSetRenderTargets(1, &target, depth_stencil.Get());
-    g_backdrop_ready = true;
+    state().context->OMSetRenderTargets(1, &target, depth_stencil.Get());
+    state().backdrop_ready = true;
 }
 } // namespace
 
 void attach(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swap_chain)
 {
-    g_device = device;
-    g_context = context;
-    g_swap_chain = swap_chain;
+    state().device = device;
+    state().context = context;
+    state().swap_chain = swap_chain;
 }
 
 void capture_backdrop(ImDrawList* draw_list)
 {
-    if (!draw_list || !g_device)
+    if (!draw_list || !state().device)
         return;
 
     draw_list->AddCallback(backdrop_callback, nullptr);
@@ -118,60 +124,55 @@ void capture_backdrop(ImDrawList* draw_list)
 
 void invalidate_backdrop()
 {
-    g_backdrop_ready = false;
-    g_backdrop.reset();
+    state().backdrop_ready = false;
+    state().backdrop.reset();
 }
 
 bool backdrop_ready()
 {
-    return g_backdrop_ready && g_backdrop.view;
+    return state().backdrop_ready && state().backdrop.view;
 }
 
 ImTextureID backdrop()
 {
-    return g_backdrop.view ? reinterpret_cast<ImTextureID>(g_backdrop.view.Get())
+    return state().backdrop.view ? reinterpret_cast<ImTextureID>(state().backdrop.view.Get())
                            : ImTextureID_Invalid;
 }
 
 void request()
 {
-    g_requested = true;
-    g_ready = false;
+    state().requested = true;
+    state().ready = false;
 }
 
 bool ready()
 {
-    return g_ready && g_snapshot.view;
+    return state().ready && state().snapshot.view;
 }
 
 ImTextureID texture()
 {
-    return g_snapshot.view ? reinterpret_cast<ImTextureID>(g_snapshot.view.Get())
+    return state().snapshot.view ? reinterpret_cast<ImTextureID>(state().snapshot.view.Get())
                            : ImTextureID_Invalid;
 }
 
 void release()
 {
-    g_snapshot.reset();
-    g_ready = false;
-    g_requested = false;
+    state().snapshot.reset();
+    state().ready = false;
+    state().requested = false;
 }
 
 void shutdown()
 {
-    g_snapshot.reset();
-    g_backdrop.reset();
-    g_requested = g_ready = g_backdrop_ready = false;
-    g_device = nullptr;
-    g_context = nullptr;
-    g_swap_chain = nullptr;
+    surfaces.erase(ImGui::GetCurrentContext());
 }
 
 void poll(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swap_chain)
 {
-    if (!g_requested || !device || !context || !swap_chain)
+    if (!state().requested || !device || !context || !swap_chain)
         return;
-    g_requested = false;
+    state().requested = false;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
     if (FAILED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
@@ -179,10 +180,10 @@ void poll(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* sw
 
     D3D11_TEXTURE2D_DESC description{};
     backbuffer->GetDesc(&description);
-    if (!g_snapshot.ensure(device, description))
+    if (!state().snapshot.ensure(device, description))
         return;
 
-    context->CopyResource(g_snapshot.texture.Get(), backbuffer.Get());
-    g_ready = true;
+    context->CopyResource(state().snapshot.texture.Get(), backbuffer.Get());
+    state().ready = true;
 }
 } // namespace solace::snapshot

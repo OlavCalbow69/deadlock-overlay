@@ -4,6 +4,7 @@
 #include "ui/foundation/rounded_panel.h"
 #include "ui/controls/form_controls.h"
 #include "ui/controls/widgets.h"
+#include "hud_style.h"
 
 namespace overlay {
 inline bool draw_auto_parry_settings(AutoParrySettings& settings,const AutoParry& controller,
@@ -29,16 +30,15 @@ inline bool draw_auto_parry_settings(AutoParrySettings& settings,const AutoParry
     ImRect attacks({input.Max.x+gap,input.Min.y},{body.Max.x,input.Max.y});
     ImRect timing(body.Min+px(0,326),{body.Max.x,body.Min.y+px(408)});
     ImRect diagnostics(body.Min+px(0,422),{body.Max.x,body.Min.y+px(532)});
-    card(input,"INPUT & DISPLAY",icons::id::lock);card(attacks,"INCOMING ATTACKS",icons::id::target);
+    card(input,"ACTIVATION",icons::id::lock);card(attacks,"INCOMING ATTACKS",icons::id::target);
     card(timing,"TIMING",icons::id::clock);card(diagnostics,"LIVE STATUS",icons::id::workflow);
     ImGui::PushID("auto_parry");
     toggle(input,53,"enabled","Auto parry",settings.enabled);
     toggle(input,85,"observe","Observation only",settings.observe_only,"Detect and draw incoming threats without sending the parry key.");
-    toggle(input,117,"hud","Status HUD",settings.show_hud);
-    toggle(input,149,"threat","Threat marker",settings.show_threat);
-    text(input.Min+px(18,187),"Parry key",true,12);
+    toggle(input,117,"threat","Threat marker",settings.show_threat);
+    text(input.Min+px(18,155),"Parry key",true,12);
     char binding[17]{};strncpy_s(binding,settings.key.c_str(),_TRUNCATE);
-    ImGui::SetCursorScreenPos({input.Max.x-px(108),input.Min.y+px(179)});ImGui::SetNextItemWidth(px(90));
+    ImGui::SetCursorScreenPos({input.Max.x-px(108),input.Min.y+px(147)});ImGui::SetNextItemWidth(px(90));
     if(ImGui::InputText("##key",binding,sizeof(binding),ImGuiInputTextFlags_CharsUppercase|ImGuiInputTextFlags_CharsNoBlank)) {
         settings.key=binding;changed=true;
     }
@@ -51,8 +51,8 @@ inline bool draw_auto_parry_settings(AutoParrySettings& settings,const AutoParry
     ImGui::EndDisabled();
     toggle(attacks,159,"spells","Counterspell projectiles",settings.counterspell,
         "Requires Counterspell owned and ready. Currently checks Charged Shot and Bebop Hook only; other spells are skipped.");
-    text(attacks.Min+px(18,198),"Current bodies + incoming trajectory",true,11);
-    text(attacks.Min+px(18,220),"Walls, cooldown and player state checked",true,11);
+    toggle(attacks,194,"puddle","Viscous Puddle Punch",settings.puddle);
+
     text(timing.Min+px(18,45),"Parry before predicted contact",true,12);
     char label[96]{};snprintf(label,sizeof(label),"%.0f ms",settings.lead_ms);
     draw_text(draw,font_semibold(13),{timing.Max.x-px(18)-text_width(font_semibold(13),label),timing.Min.y+px(44)},
@@ -72,19 +72,14 @@ inline bool draw_auto_parry_settings(AutoParrySettings& settings,const AutoParry
 }
 
 inline void draw_auto_parry_hud(ImDrawList* draw,const AutoParry& controller,const ParryReadState& state,
-    float scale,ImVec2 origin={24,180}) {
-    origin=origin*scale;const ImVec2 size{340*scale,74*scale};
-    const auto color=controller.decision.valid?IM_COL32(255,199,76,240):IM_COL32(96,175,248,230);
-    draw->AddRectFilled(origin,origin+size,IM_COL32(15,20,28,210),10*scale);
-    draw->AddRect(origin,origin+size,color,10*scale,0,scale);
-    auto line=[&](float y,const char* value,ImU32 c) {draw->AddText(ImGui::GetFont(),12*scale,origin+ImVec2(12*scale,y*scale),c,value);};
-    line(9,"AUTO PARRY",color);
-    draw->PushClipRect(origin+ImVec2(12*scale,0),origin+size-ImVec2(12*scale,0),true);
-    line(29,controller.status.c_str(),IM_COL32(235,242,255,255));
-    char label[96]{};
-    if(controller.decision.valid)snprintf(label,sizeof(label),"%s / contact %.0f ms",parry_threat_name(controller.decision.kind),controller.decision.impact_ms);
-    else snprintf(label,sizeof(label),"Parry CD %.2fs / spell CD %.2fs",state.cooldown_remaining,state.spell_cooldown_remaining);
-    line(49,label,IM_COL32(170,183,201,255));draw->PopClipRect();
+    float scale,ImVec2 origin={24,180},float opacity=1) {
+    char value[32]{},detail[96]{};ImU32 accent=hud_muted();
+    if(controller.decision.valid){snprintf(value,sizeof(value),"%.0f ms",controller.decision.impact_ms);snprintf(detail,sizeof(detail),"%s",parry_threat_name(controller.decision.kind));accent=hud_warning();}
+    else if(!state.valid){strcpy_s(value,"--");strcpy_s(detail,"Waiting for attack data");}
+    else if(state.active){strcpy_s(value,"Active");strcpy_s(detail,"Parry window open");accent=hud_good();}
+    else if(state.ready){strcpy_s(value,"Ready");snprintf(detail,sizeof(detail),"%s",controller.status.c_str());accent=hud_good();}
+    else{snprintf(value,sizeof(value),"%.1fs",state.cooldown_remaining);strcpy_s(detail,"Cooldown");}
+    draw_hud_card(draw,origin*scale,scale,"Parry",value,detail,HudGlyph::Shield,accent,opacity);
 }
 inline void draw_parry_threat(ImDrawList* draw,const Snapshot& snapshot,const ParryDecision& threat,float width,float height,float scale) {
     if(!threat.valid)return;ScreenPoint a{},b{};

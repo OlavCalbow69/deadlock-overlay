@@ -61,7 +61,7 @@ inline bool focus_target_geometry(const Snapshot& snapshot,const FocusTarget& ta
         const auto* zone=zones?zones->find(target.handle):nullptr;
         return zone&&zone->valid&&(retained?zone->retention_hit:zone->activation_hit);
     }
-    return distance<=area.radius_degrees*(retained?1.3f:1.f);
+    return adaptive_area_accepts(snapshot.matrix,world,area,distance,retained);
 }
 inline std::mt19937& focus_random() {static thread_local std::mt19937 rng(std::random_device{}());return rng;}
 inline const FocusTarget* select_focus_target(const Snapshot& snapshot,FocusOptions options,bool enemies_only,int bone,bool free_move,bool visible_only,float width,float height,ScreenPoint center,const AdaptiveSettings& area={},std::mt19937* random=nullptr,FreeMovementMode mode=FreeMovementMode::BoneLine,const AdaptiveTargetZones* zones=nullptr) {
@@ -132,7 +132,7 @@ struct ReplayCamera {
         desired=std::clamp(desired,-limit,limit);
         auto count=static_cast<LONG>(desired);remainder=desired-float(count);return count;
     }
-    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,const AdaptiveSettings& area_config,double now,FreeMovementMode mode=FreeMovementMode::BoneLine,FocusHoldButton selected_hold_button=FocusHoldButton::SideButtons,const AdaptiveTargetZones* zones=nullptr,bool hitscan=false) {
+    void update(MakcuInput& input,const Snapshot& snapshot,HWND game,bool enabled,bool debug_enabled,bool enemies_only,bool menu,int selected_bone,float speed,bool free_move,bool prediction,float projectile_speed,bool inherit_velocity,bool auto_speed,bool visible_only,FocusOptions targets,const AdaptiveSettings& area_config,double now,FreeMovementMode mode=FreeMovementMode::BoneLine,FocusHoldButton selected_hold_button=FocusHoldButton::SideButtons,const AdaptiveTargetZones* zones=nullptr,bool hitscan=false,float fixed_lead=-1.f) {
         input.cancel_motion(); // No previous correction survives a changed gate/occlusion state.
         if(hold_button!=selected_hold_button){release();hold_button=selected_hold_button;}
         if(!input.ready()){release();return;}
@@ -140,7 +140,7 @@ struct ReplayCamera {
         bool foreground=game&&GetForegroundWindow()==game&&!IsIconic(game);
         if(!camera_allowed(enabled,camera_mode_allowed(snapshot.replay,snapshot.practice,debug_enabled),foreground,menu,held,GetTickCount64(),snapshot.time)){release();return;}
         RECT area{};if(!GetClientRect(game,&area)||area.right<=0||area.bottom<=0){release();return;}
-        selected_bone=std::clamp(selected_bone,0,2);ScreenPoint center{area.right*.5f,area.bottom*.5f},point{};
+        selected_bone=std::clamp(selected_bone,0,2);ScreenPoint center=focus_reference(float(area.right),float(area.bottom));ScreenPoint point{};
         const auto* selected=choose(snapshot,targets,enemies_only,selected_bone,free_move,visible_only,area_config,float(area.right),float(area.bottom),center,now,nullptr,mode,zones);
         if(!selected)return;
         point_valid=false;
@@ -155,6 +155,11 @@ struct ReplayCamera {
             Vec3 compensated{};float position=line_position;int compensated_hitbox=-1;bool compensated_inside=false;
             if(focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,sample_lead,compensated,position,mode,&compensated_hitbox,&compensated_inside)) {
                 aim_point=compensated;line_position=position;prediction_active=true;lead=sample_lead;hitbox_index=compensated_hitbox;inside_hitbox=compensated_inside;
+            }
+        }else if(!hitscan&&fixed_lead>=0&&selected->velocity_valid) {
+            Vec3 manual_lead=mul(selected->velocity,fixed_lead);float position{};int index{};bool inside{};
+            if(focus_point(snapshot.matrix,*selected,bone,free_move,float(area.right),float(area.bottom),center,manual_lead,aim_point,position,mode,&index,&inside)) {
+                prediction_active=true;flight_time=fixed_lead;lead=manual_lead;line_position=position;hitbox_index=index;inside_hitbox=inside;
             }
         }else if(!hitscan&&prediction&&(!auto_speed||snapshot.weapon.valid)&&selected->velocity_valid&&(inheritance==0||snapshot.local_velocity_valid)&&camera_origin(snapshot.matrix,source)){
             Vec3 relative=sub(selected->velocity,mul(snapshot.local_velocity,inheritance));
@@ -181,6 +186,7 @@ struct ReplayCamera {
         if(!(dx||dy))return;
         // Recheck foreground immediately before sending relative mouse input.
         if(GetForegroundWindow()!=game||!focus_button_held(hold_button))return;
+        tracking_motion.error=std::hypot(point.x-center.x,point.y-center.y);
         if(input.move(game,dx,dy,hold_button))++moves;
         else {++input_failures;lost=input_blocked=true;point_valid=false;remainder_x=remainder_y=0;}
     }

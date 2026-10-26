@@ -34,6 +34,59 @@ sealed class PeImage {
     }
     public bool Executable(uint rva) => Sections.Any(s => (s.Flags & 0x20000000) != 0 && rva >= s.Rva && (ulong)rva < (ulong)s.Rva + (uint)s.Size);
     public bool Data(uint rva) => Sections.Any(s => (s.Flags & 0x20000000) == 0 && rva >= s.Rva && (ulong)rva < (ulong)s.Rva + Math.Max(s.VirtualSize, (uint)s.Size));
+    // Optional Puddle Punch property-view layout. Verify the two property
+    // registration calls, their exact string arguments and the following stride.
+    // No previous-build instance offsets participate in the search.
+    public (uint Radius,uint Reach) PuddleViews(uint dirty) {
+        var found = new HashSet<(uint,uint)>();
+        bool Name(uint rva,string name) {try{return Data(rva)&&At(rva,name.Length+1).SequenceEqual(Encoding.ASCII.GetBytes(name+"\0"));}catch(InvalidDataException){return false;}}
+        uint Rip(uint at,int displacement,int end) => checked((uint)(at+end+BinaryPrimitives.ReadInt32LittleEndian(At(at+(uint)displacement,4))));
+        const string witness="48 8D 8B ? ? ? ? 41 B1 01 4C 8D 05 ? ? ? ? 48 8B D3 E8 ? ? ? ? 48 8D 8B ? ? ? ? 41 B1 01 4C 8D 05 ? ? ? ? 48 8B D3 E8 ? ? ? ? 48 8D 8B ? ? ? ?";
+        foreach(var section in Sections.Where(s => (s.Flags&0x20000000)!=0)) {
+            var code=Bytes.AsSpan(section.Offset,section.Size);int next=35;
+            while(next<code.Length) {
+                int index=code[next..].IndexOf(new byte[]{0x4c,0x8d,0x05});if(index<0)break;index+=next;next=index+3;
+                if(index<35||index+22>code.Length)continue;uint at=section.Rva+(uint)index-35;
+                try {
+                    if(!Name(Rip(at,38,42),"PunchHalfHeight")||!MatchesAt(at,witness)||!Name(Rip(at,13,17),"Radius"))continue;
+                    uint call=Rip(at,21,25);if(call!=Rip(at,46,50)||!Executable(call))continue;
+                    uint radius=BinaryPrimitives.ReadUInt32LittleEndian(At(at+3,4)),reach=BinaryPrimitives.ReadUInt32LittleEndian(At(at+28,4)),following=BinaryPrimitives.ReadUInt32LittleEndian(At(at+53,4));
+                    if(radius<0x1000||following>=0x20000||radius%8!=0||reach-radius!=dirty+4||following-reach!=dirty+4)continue;
+                    found.Add((radius,reach));
+                }catch(InvalidDataException){}catch(OverflowException){}
+            }
+        }
+        return found.Count==1?found.Single():throw new InvalidDataException("Puddle Punch property registration missing or ambiguous");
+    }
+    public Dictionary<string,uint> AssassinateViews(uint dirty) {
+        var names=new Dictionary<string,string>{{"Damage","as_damage_view"},{"LowHealthEnemyDamageBonus","as_bonus_view"},
+            {"HeadshotBonus","as_head_view"},{"LowHealthEnemyThresholdPct","as_threshold_view"},
+            {"MinChargeDamagePercent","as_min_power_view"},{"TimeToFullCharge","as_charge_view"},{"Range","as_range_view"}};
+        var results=new List<Dictionary<string,uint>>();
+        const string witness="48 8D 8B ? ? ? ? 41 B1 01 4C 8D 05 ? ? ? ? 48 8B D3 E8 ? ? ? ?";
+        foreach(var section in Sections.Where(s=>(s.Flags&0x20000000)!=0)) {
+            var code=Bytes.AsSpan(section.Offset,section.Size);
+            for(int at=0;at+400<code.Length;++at) {
+                if(code[at]!=0x48||code[at+1]!=0x8d||code[at+2]!=0x8b)continue;
+                uint start=section.Rva+(uint)at;
+                if(!MatchesAt(start,witness))continue;
+                long name=(long)start+17+BinaryPrimitives.ReadInt32LittleEndian(At(start+13,4));
+                if(name<0||name>=Size||!At((uint)name,11).SequenceEqual(Encoding.ASCII.GetBytes("ShotRadius\0")))continue;
+                var found=new Dictionary<string,uint>();uint previous=0;bool valid=true;
+                for(int n=0;n<13;++n) {
+                    uint slot=start+(uint)(25*n);if(!MatchesAt(slot,witness)){valid=false;break;}
+                    uint member=BinaryPrimitives.ReadUInt32LittleEndian(At(slot+3,4));
+                    if(member<0x1000||member>0x20000||member%8!=0||(n>0&&member-previous!=dirty+4)){valid=false;break;}previous=member;
+                    long str=(long)slot+17+BinaryPrimitives.ReadInt32LittleEndian(At(slot+13,4));
+                    if(str<0||str>=Size){valid=false;break;}
+                    var bytes=At((uint)str,80);int end=bytes.IndexOf((byte)0);if(end<0){valid=false;break;}
+                    var text=Encoding.ASCII.GetString(bytes[..end]);if(names.TryGetValue(text,out string? key))found.TryAdd(key,member);
+                }
+                if(valid&&found.Count==names.Count)results.Add(found);
+            }
+        }
+        return results.Count==1?results[0]:throw new InvalidDataException("Assassinate property registration missing or ambiguous");
+    }
     public bool MatchesAt(uint rva, string text) {
         var tokens = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);var bytes = At(rva, tokens.Length);
         for (int i = 0; i < tokens.Length; i++) if (tokens[i] != "?" && bytes[i] != Convert.ToByte(tokens[i], 16)) return false;
@@ -74,7 +127,7 @@ sealed class PeImage {
     // cannot be mistaken for the enum's numeric value.
     public uint ModifierValue(string name) {
         string prefix=name.StartsWith("MODIFIER_VALUE_",StringComparison.Ordinal)?"MODIFIER_VALUE_"
-            :name.StartsWith("MODIFIER_STATE_",StringComparison.Ordinal)?"MODIFIER_STATE_":"";
+            :name.StartsWith("MODIFIER_STATE_",StringComparison.Ordinal)?"MODIFIER_STATE_":name.StartsWith("CLASS_",StringComparison.Ordinal)?"CLASS_":"";
         if(prefix.Length==0)throw new InvalidDataException("Invalid modifier name");
         var needle = Encoding.ASCII.GetBytes(name + "\0");var prefixBytes = Encoding.ASCII.GetBytes(prefix);
         var names = new HashSet<uint>();var values = new HashSet<uint>();
@@ -104,6 +157,31 @@ sealed class PeImage {
             }
         }
         return values.Count == 1 ? values.Single() : throw new InvalidDataException("Named modifier value is missing or ambiguous: " + name);
+    }
+    public uint NamedConvarSlot(string name) {
+        var names=new HashSet<uint>();var needle=Encoding.ASCII.GetBytes(name+"\0");
+        foreach(var section in Sections.Where(s=>(s.Flags&0x20000000)==0)) {
+            var bytes=Bytes.AsSpan(section.Offset,section.Size);int start=0;
+            while(start<bytes.Length){int found=bytes[start..].IndexOf(needle);if(found<0)break;found+=start;start=found+1;names.Add(section.Rva+(uint)found);}
+        }
+        var results=new HashSet<uint>();
+        foreach(var section in Sections.Where(s=>(s.Flags&0x20000000)!=0)) {
+            var bytes=Bytes.AsSpan(section.Offset,section.Size);
+            for(int at=0;at+7<bytes.Length;++at) {
+                if(bytes[at]!=0x48||bytes[at+1]!=0x8d||bytes[at+2]!=0x15)continue;
+                long target=(long)section.Rva+at+7+BinaryPrimitives.ReadInt32LittleEndian(bytes[(at+3)..]);if(target<0||!names.Contains((uint)target))continue;
+                // Named float ConVar registration: the same call receives the
+                // name in RDX and its 16-byte reference object in RCX.
+                int end=Math.Min(at+128,bytes.Length-12);
+                for(int i=at+7;i<end;++i)if(bytes[i]==0x48&&bytes[i+1]==0x8d&&bytes[i+2]==0x0d&&bytes[i+7]==0xe8) {
+                    long reference=(long)section.Rva+i+7+BinaryPrimitives.ReadInt32LittleEndian(bytes[(i+3)..]);
+                    long call=(long)section.Rva+i+12+BinaryPrimitives.ReadInt32LittleEndian(bytes[(i+8)..]);
+                    if(reference>=0x1000&&reference+16<Size&&reference%8==0&&Data((uint)reference)&&call>0&&call<Size&&Executable((uint)call))results.Add((uint)reference+8);
+                    break;
+                }
+            }
+        }
+        return results.Count==1?results.Single():throw new InvalidDataException("Named ConVar registration missing or ambiguous: "+name);
     }
     public uint Vtable(string type) {
         var name = Encoding.ASCII.GetBytes(type + "\0"); var descriptors = new HashSet<uint>();

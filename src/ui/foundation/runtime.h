@@ -23,7 +23,7 @@ class animation_bucket_base
 {
   public:
     virtual ~animation_bucket_base() = default;
-    virtual void collect(int current_frame, int max_unused_frames) = 0;
+    virtual void collect(ImGuiContext* context, int current_frame, int max_unused_frames) = 0;
     virtual void clear() noexcept = 0;
 };
 
@@ -37,20 +37,20 @@ template <typename T> class animation_bucket final : public animation_bucket_bas
         register_animation_bucket(this);
     }
 
-    T* get(ImGuiID id, int current_frame)
+    T* get(ImGuiContext* context, ImGuiID id, int current_frame)
     {
-        entry& item = states_[id];
+        entry& item = states_[key{context,id}];
         if (!item.value)
             item.value = std::make_unique<T>();
         item.last_seen_frame = current_frame;
         return item.value.get();
     }
 
-    void collect(int current_frame, int max_unused_frames) override
+    void collect(ImGuiContext* context, int current_frame, int max_unused_frames) override
     {
         for (auto item = states_.begin(); item != states_.end();)
         {
-            if (current_frame - item->second.last_seen_frame > max_unused_frames)
+            if (item->first.context==context && current_frame - item->second.last_seen_frame > max_unused_frames)
                 item = states_.erase(item);
             else
                 ++item;
@@ -69,15 +69,17 @@ template <typename T> class animation_bucket final : public animation_bucket_bas
         int last_seen_frame = 0;
     };
 
-    std::unordered_map<ImGuiID, entry> states_;
+    struct key {ImGuiContext* context{};ImGuiID id{};bool operator==(const key&)const=default;};
+    struct key_hash {size_t operator()(const key& value)const {return std::hash<ImGuiContext*>{}(value.context)^(size_t(value.id)<<1);}};
+    std::unordered_map<key, entry, key_hash> states_;
 };
 } // namespace detail
 
 template <typename T> T* animation_state(ImGuiID id)
 {
     static detail::animation_bucket<T> states;
-    const ImGuiContext* context = ImGui::GetCurrentContext();
-    return states.get(id, context ? ImGui::GetFrameCount() : 0);
+    auto context = ImGui::GetCurrentContext();
+    return states.get(context,id, context ? ImGui::GetFrameCount() : 0);
 }
 
 void collect_animation_states(int max_unused_frames = 3600);

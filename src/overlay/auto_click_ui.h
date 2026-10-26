@@ -5,10 +5,11 @@
 #include "ui/foundation/rounded_panel.h"
 #include "ui/controls/form_controls.h"
 #include "ui/controls/widgets.h"
+#include "external_ui.h"
 
 namespace overlay {
-inline bool draw_auto_click_settings(CameraFocusSettings& regular,CameraFocusSettings& ultimate,bool& edit_ultimate,
-    bool ultimate_active,const RayClick& controller,MakcuInput& input,const ImRect& body,float alpha,bool transparent) {
+inline bool draw_auto_click_settings(CameraFocusSettings& settings,bool ultimate,bool ultimate_active,
+    const RayClick& controller,MakcuInput& input,const ImRect& body,float alpha,bool transparent) {
     using namespace solace;
     auto* draw=ImGui::GetWindowDrawList();bool changed=false;ImGui::PushID("auto_click_page");
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,px(10,6));
@@ -24,25 +25,20 @@ inline bool draw_auto_click_settings(CameraFocusSettings& regular,CameraFocusSet
     auto combo=[&](const ImRect& box,float y,const char* label,const char* id,int& value,const char* const* choices,int count) {
         text(box.Min+px(20,y+6),label,true);
         const float width=std::min(px(205),box.GetWidth()*.57f);
-        ImGui::SetCursorScreenPos({box.Max.x-px(20)-width,box.Min.y+px(y)});ImGui::SetNextItemWidth(width);
-        return ImGui::Combo(id,&value,choices,count);
+        return extra_select_at(id,{box.Max.x-px(20)-width,box.Min.y+px(y)},width,value,choices,count);
     };
-    text(body.Min+px(0,48),"Profile",true);
-    ImGui::SetCursorScreenPos(body.Min+px(76,42));ImGui::SetNextItemWidth(px(222));
-    constexpr const char* profiles[]={"Regular view","Vindicta Ultimate"};int profile=edit_ultimate?1:0;
-    if(ImGui::Combo("##profile",&profile,profiles,2))edit_ultimate=profile!=0;
-    const bool active=edit_ultimate==ultimate_active;
+    text(body.Min+px(0,48),ultimate?"Assassinate shots":"Regular view",true);
+    const bool active=ultimate==ultimate_active;
     badge("profile_active",draw,{body.Max.x-px(150),body.Min.y+px(46)},active?"Active profile":"Profile inactive",active?badge_good:badge_warn,false,alpha);
-    auto& settings=edit_ultimate?ultimate:regular;
-    if(edit_ultimate)restrict_assassinate_targets(settings);
+    if(ultimate)restrict_assassinate_targets(settings);
     const float gap=px(16),left=(body.GetWidth()-gap)*.52f;
-    ImRect activation(body.Min+px(0,90),body.Min+ImVec2(left,px(350)));
+    ImRect activation(body.Min+px(0,ultimate?80.f:90.f),body.Min+ImVec2(left,px(ultimate?340.f:350.f)));
     ImRect rules({activation.Max.x+gap,activation.Min.y},{body.Max.x,activation.Max.y});
-    ImRect live(body.Min+px(0,366),{body.Max.x,body.Min.y+px(514)});
+    ImRect live(body.Min+px(0,ultimate?356.f:366.f),{body.Max.x,body.Min.y+px(ultimate?484.f:514.f)});
     card(activation,"ACTIVATION",icons::id::target);card(rules,"SHOT RULES",icons::id::lock);card(live,"LIVE STATUS",icons::id::workflow);
     text(activation.Min+px(20,56),"Auto click");
     changed|=switch_toggle("enabled",{activation.Max.x-px(20+switch_w),activation.Min.y+px(50)},&settings.auto_click);
-    if(edit_ultimate) {
+    if(ultimate) {
         text(activation.Min+px(20,96),"Target",true);
         text({activation.Max.x-px(170),activation.Min.y+px(96)},"Enemy players");
     }else {
@@ -70,9 +66,9 @@ inline bool draw_auto_click_settings(CameraFocusSettings& regular,CameraFocusSet
     draw->PushClipRect(live.Min+px(20,42),live.Max-px(20,12),true);
     text(live.Min+px(20,49),status);
     snprintf(label,sizeof(label),"Input: %s / %s",input.label(),hold?"Hold either side button":"Automatic orb shooting");
-    text(live.Min+px(20,82),label,true,12);
+    text(live.Min+px(20,76),label,true,12);
     snprintf(label,sizeof(label),"Clicks sent this session: %llu",static_cast<unsigned long long>(input.clicks()));
-    text(live.Min+px(20,110),label,true,12);
+    text(live.Min+px(20,101),label,true,12);
     draw->PopClipRect();
     ImGui::PopStyleVar();ImGui::PopID();return changed;
 }

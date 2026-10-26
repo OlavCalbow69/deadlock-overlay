@@ -11,7 +11,14 @@
   <ItemGroup>
     <EmbeddedResource Include="../../src/overlay/reader_profile_values.inc" LogicalName="ReaderContract" />
     <EmbeddedResource Include="reader-signatures.json" LogicalName="ReaderSignatures" />
+    <EmbeddedResource Include="../../src/overlay/reader_feature_fields.inc" LogicalName="ReaderFeatures" />
     <PackageReference Include="ValveResourceFormat" Version="20.1.7467" />
     <Compile Include="../map-export/MapExporter.cs" Link="MapExporter.cs" />
+    <Compile Include="../icon-export/GameAssetExport.cs" Link="GameAssetExport.cs" />
+    <Compile Include="../icon-export/IconCatalog.cs" Link="IconCatalog.cs" />
+    <Compile Include="../icon-export/RuntimeAssets.cs" Link="RuntimeAssets.cs" />
+    <Compile Include="../icon-export/MapLaneExport.cs" Link="MapLaneExport.cs" />
+    <Compile Include="../preview-export/GamePreviewExport.cs" Link="GamePreviewExport.cs" />
+    <Compile Include="../preview-export/PreviewPackage.cs" Link="PreviewPackage.cs" />
   </ItemGroup>
 </Project>
